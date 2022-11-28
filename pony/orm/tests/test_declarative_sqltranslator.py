@@ -1,5 +1,4 @@
 from __future__ import absolute_import, print_function, division
-from pony.py23compat import PY2
 
 import unittest
 from datetime import date
@@ -16,7 +15,7 @@ class Department(db.Entity):
     courses = Set('Course')
 
 class Student(db.Entity):
-    name = Required(unicode)
+    name = Required(str)
     group = Required('Group')
     scholarship = Required(int, default=0)
     picture = Optional(buffer)
@@ -31,7 +30,7 @@ class Group(db.Entity):
 
 class Course(db.Entity):
     dept = Required(Department)
-    name = Required(unicode)
+    name = Required(str)
     credits = Optional(int)
     semester = Required(int)
     PrimaryKey(name, semester)
@@ -47,18 +46,18 @@ class Grade(db.Entity):
     teacher = Required('Teacher')
 
 class Teacher(db.Entity):
-    name = Required(unicode)
+    name = Required(str)
     grades = Set(Grade)
 
 class Room(db.Entity):
-    name = PrimaryKey(unicode)
+    name = PrimaryKey(str)
     groups = Set(Group)
 
 
 db2 = Database()
 
 class Room2(db2.Entity):
-    name = PrimaryKey(unicode)
+    name = PrimaryKey(str)
 
 name1 = 'S1'
 
@@ -72,7 +71,7 @@ class TestSQLTranslator(unittest.TestCase):
             d2 = Department(number=43)
             g1 = Group(id=1, dept=d1)
             g2 = Group(id=2, dept=d2)
-            s1 = Student(id=1, name='S1', group=g1, scholarship=0)
+            s1 = Student(id=1, name='S1', group=g1, scholarship=0, picture=b'image')
             s2 = Student(id=2, name='S2', group=g1, scholarship=100)
             s3 = Student(id=3, name='S3', group=g2, scholarship=500)
             c1 = Course(name='Math', semester=1, dept=d1)
@@ -322,10 +321,9 @@ class TestSQLTranslator(unittest.TestCase):
         s1 = Student[1]
         result = set(select(g for g in Group if s1.name not in g.students.name))
         self.assertEqual(result, {Group[2]})
+    @raises_exception(TypeError, 'string argument without an encoding')
     def test_buffer_monad1(self):
-        try: select(s for s in Student if s.picture == buffer('abc'))
-        except TypeError as e: self.assertTrue(not PY2 and str(e) == 'string argument without an encoding')
-        else: self.assertTrue(PY2)
+        select(s for s in Student if s.picture == buffer('abc'))
     def test_buffer_monad2(self):
         select(s for s in Student if s.picture == buffer('abc', 'ascii'))
     def test_database_monad(self):
@@ -453,6 +451,9 @@ class TestSQLTranslator(unittest.TestCase):
     def test_query_result_remove(self):
         result = select(s for s in Student)[:]
         result.remove(None)
+    def test_if_expression(self):
+        result = select(s.id if s.picture else -s.id for s in Student)[:]
+        self.assertEqual({1, -2, -3}, set(result))
 
 
 if __name__ == "__main__":

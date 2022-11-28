@@ -1,5 +1,5 @@
 from __future__ import absolute_import
-from pony.py23compat import PY2, basestring, unicode, buffer, int_types
+from pony.py23compat import buffer, int_types
 
 from decimal import Decimal
 from datetime import datetime, date, time, timedelta
@@ -60,7 +60,7 @@ class PGUuidConverter(dbapiprovider.UuidConverter):
 class CRArrayConverter(PGArrayConverter):
     array_types = {
         int: ('INT', PGIntConverter),
-        unicode: ('STRING', PGStrConverter),
+        str: ('STRING', PGStrConverter),
         float: ('DOUBLE PRECISION', PGRealConverter)
     }
 
@@ -96,7 +96,7 @@ class CRProvider(PGProvider):
     converter_classes = [
         (NoneType, dbapiprovider.NoneConverter),
         (bool, dbapiprovider.BoolConverter),
-        (basestring, PGStrConverter),
+        (str, PGStrConverter),
         (int_types, CRIntConverter),
         (float, PGRealConverter),
         (Decimal, dbapiprovider.DecimalConverter),

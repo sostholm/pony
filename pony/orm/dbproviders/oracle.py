@@ -1,5 +1,5 @@
 from __future__ import absolute_import
-from pony.py23compat import PY2, iteritems, basestring, unicode, buffer, int_types
+from pony.py23compat import buffer, int_types
 
 import os
 os.environ["NLS_LANG"] = "AMERICAN_AMERICA.UTF8"
@@ -39,7 +39,7 @@ class OraSequence(DBObject):
         sequence.table = table
         table_name = table.name
         if name is not None: sequence.name = name
-        elif isinstance(table_name, basestring): sequence.name = table_name + '_SEQ'
+        elif isinstance(table_name, str): sequence.name = table_name + '_SEQ'
         else: sequence.name = tuple(table_name[:-1]) + (table_name[0] + '_SEQ',)
     def exists(sequence, provider, connection, case_sensitive=True):
         if case_sensitive: sql = 'SELECT sequence_name FROM all_sequences ' \
@@ -73,7 +73,7 @@ class OraTrigger(DBObject):
         trigger.column = column
         trigger.sequence = sequence
         table_name = table.name
-        if not isinstance(table_name, basestring): table_name = table_name[-1]
+        if not isinstance(table_name, str): table_name = table_name[-1]
         trigger.name = table_name + '_BI' # Before Insert
     def exists(trigger, provider, connection, case_sensitive=True):
         if case_sensitive: sql = 'SELECT trigger_name FROM all_triggers ' \
@@ -246,7 +246,7 @@ class OraBuilder(SQLBuilder):
     def JSON_NONZERO(builder, expr):
         return 'COALESCE(', builder(expr), ''', 'null') NOT IN ('null', 'false', '0', '""', '[]', '{}')'''
     def JSON_CONTAINS(builder, expr, path, key):
-        assert key[0] == 'VALUE' and isinstance(key[1], basestring)
+        assert key[0] == 'VALUE' and isinstance(key[1], str)
         path_sql, has_params, has_wildcards = builder.build_json_path(path)
         path_with_key_sql, _, _ = builder.build_json_path(path + [ key ])
         expr_sql = builder(expr)
@@ -286,11 +286,10 @@ json_item_re = re.compile('[\w\s]*')
 
 
 class OraBoolConverter(dbapiprovider.BoolConverter):
-    if not PY2:
-        def py2sql(converter, val):
-            # Fixes cx_Oracle 5.1.3 Python 3 bug:
-            # "DatabaseError: OCI-22062: invalid input string [True]"
-            return int(val)
+    def py2sql(converter, val):
+        # Fixes cx_Oracle 5.1.3 Python 3 bug:
+        # "DatabaseError: OCI-22062: invalid input string [True]"
+        return int(val)
     def sql2py(converter, val):
         return bool(val)  # TODO: True/False, T/F, Y/N, Yes/No, etc.
     def sql_type(converter):
@@ -303,7 +302,6 @@ class OraStrConverter(dbapiprovider.StrConverter):
     def sql2py(converter, val):
         if isinstance(val, cx_Oracle.LOB):
             val = val.read()
-            if PY2: val = val.decode('utf8')
         return val
     def sql_type(converter):
         # TODO: Add support for NVARCHAR2 and NCLOB datatypes
@@ -404,7 +402,7 @@ class OraProvider(DBAPIProvider):
     converter_classes = [
         (NoneType, dbapiprovider.NoneConverter),
         (bool, OraBoolConverter),
-        (basestring, OraStrConverter),
+        (str, OraStrConverter),
         (int_types, OraIntConverter),
         (float, OraRealConverter),
         (Decimal, OraDecimalConverter),
@@ -439,7 +437,7 @@ class OraProvider(DBAPIProvider):
 
     def normalize_vars(provider, vars, vartypes):
         DBAPIProvider.normalize_vars(provider, vars, vartypes)
-        for key, value in iteritems(vars):
+        for key, value in vars.items():
             if value == '':
                 vars[key] = None
                 vartypes[key] = NoneType
@@ -517,7 +515,7 @@ class OraProvider(DBAPIProvider):
 
     def index_exists(provider, connection, table_name, index_name, case_sensitive=True):
         owner_name, table_name = provider.split_table_name(table_name)
-        if not isinstance(index_name, basestring): throw(NotImplementedError)
+        if not isinstance(index_name, str): throw(NotImplementedError)
         if case_sensitive: sql = 'SELECT index_name FROM all_indexes WHERE owner = :o ' \
                                  'AND index_name = :i AND table_owner = :o AND table_name = :t'
         else: sql = 'SELECT index_name FROM all_indexes WHERE owner = :o ' \
@@ -529,7 +527,7 @@ class OraProvider(DBAPIProvider):
 
     def fk_exists(provider, connection, table_name, fk_name, case_sensitive=True):
         owner_name, table_name = provider.split_table_name(table_name)
-        if not isinstance(fk_name, basestring): throw(NotImplementedError)
+        if not isinstance(fk_name, str): throw(NotImplementedError)
         if case_sensitive:
             sql = "SELECT constraint_name FROM user_constraints WHERE constraint_type = 'R' " \
                   'AND table_name = :tn AND constraint_name = :cn AND owner = :o'
@@ -568,7 +566,7 @@ def output_type_handler(cursor, name, defaultType, size, precision, scale):
         if scale != -127:
             return cursor.var(cx_Oracle.STRING, 100, cursor.arraysize, outconverter=to_decimal)
     elif defaultType in (cx_Oracle.STRING, cx_Oracle.FIXED_CHAR):
-        return cursor.var(unicode, size, cursor.arraysize)  # from cx_Oracle example
+        return cursor.var(str, size, cursor.arraysize)  # from cx_Oracle example
     return None
 
 class OraPool(object):
@@ -602,7 +600,7 @@ def get_inputsize(arg):
 def set_input_sizes(cursor, arguments):
     if type(arguments) is dict:
         input_sizes = {}
-        for name, arg in iteritems(arguments):
+        for name, arg in arguments.items():
             size = get_inputsize(arg)
             if size is not None: input_sizes[name] = size
         cursor.setinputsizes(**input_sizes)

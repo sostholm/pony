@@ -13,11 +13,11 @@ class TestOneToOne3(unittest.TestCase):
         self.db = Database()
 
         class Person(self.db.Entity):
-            name = Required(unicode)
+            name = Required(str)
             passport = Optional("Passport", cascade_delete=True)
 
         class Passport(self.db.Entity):
-            code = Required(unicode)
+            code = Required(str)
             person = Required("Person")
 
         setup_database(self.db)
@@ -72,8 +72,7 @@ WHERE "passport"."id" IS NOT NULL''')
         flush()
         sql = self.db.last_sql
         self.assertEqual(sql, '''DELETE FROM "Person"
-WHERE "id" = ?
-  AND "name" = ?''')
+WHERE "id" = ?''')
 
     @raises_exception(ConstraintError, 'Cannot unlink Passport[1] from previous Person[1] object, because Passport.person attribute is required')
     @db_session

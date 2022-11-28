@@ -1,10 +1,10 @@
 from __future__ import absolute_import, print_function, division
-from pony.py23compat import PY2, items_list, izip, basestring, unicode, buffer, int_types, iteritems
+from pony.py23compat import buffer, int_types
 
 import sys, types, weakref
 from decimal import Decimal
 from datetime import date, time, datetime, timedelta
-from functools import wraps, WRAPPER_ASSIGNMENTS
+from functools import wraps
 from uuid import UUID
 
 from pony.utils import throw, parse_expr, deref_proxy
@@ -14,11 +14,7 @@ NoneType = type(None)
 class LongStr(str):
     lazy = True
 
-if PY2:
-    class LongUnicode(unicode):
-        lazy = True
-else:
-    LongUnicode = LongStr
+LongUnicode = LongStr
 
 class SetType(object):
     __slots__ = 'item_type'
@@ -53,12 +49,8 @@ class MethodType(object):
     def __deepcopy__(self, memo):
         return self  # MethodType instances are "immutable"
     def __init__(self, method):
-        if PY2:
-            self.obj = method.im_self
-            self.func = method.im_func
-        else:
-            self.obj = method.__self__
-            self.func = method.__func__
+        self.obj = method.__self__
+        self.func = method.__func__
     def __eq__(self, other):
         return type(other) is MethodType and self.obj == other.obj and self.func == other.func
     def __ne__(self, other):
@@ -71,7 +63,8 @@ raw_sql_cache = {}
 def parse_raw_sql(sql):
     result = raw_sql_cache.get(sql)
     if result is not None: return result
-    assert isinstance(sql, basestring) and len(sql) > 0
+    if not isinstance(sql, str) or not sql:
+        throw(TypeError, "Raw SQL string fragment expected. Got: %r" % sql)
     items = []
     codes = []
     pos = 0
@@ -166,15 +159,8 @@ def normalize(value):
         entity = value.entity
         return SetType(entity), entity
 
-    if PY2 and isinstance(value, str):
-        try:
-            value.decode('ascii')
-        except UnicodeDecodeError:
-            throw(TypeError, 'The bytestring %r contains non-ascii symbols. Try to pass unicode string instead' % value)
-        else:
-            return unicode, value
-    elif isinstance(value, unicode):
-        return unicode, value
+    if isinstance(value, str):
+        return str, value
 
     if t in function_types:
         return FuncType(value), value
@@ -198,7 +184,7 @@ def normalize_type(t):
     t = type_normalization_dict.get(t, t)
     if t in primitive_types: return t
     if t in (slice, type(Ellipsis)): return t
-    if issubclass(t, basestring): return unicode
+    if issubclass(t, str): return str
     if issubclass(t, (dict, Json)): return Json
     if issubclass(t, Array): return t
     throw(TypeError, 'Unsupported type %r' % t.__name__)
@@ -211,7 +197,7 @@ coercions = {
     (bool, float): float,
     (bool, Decimal): Decimal
     }
-coercions.update(((t2, t1), t3) for ((t1, t2), t3) in items_list(coercions))
+coercions.update(((t2, t1), t3) for ((t1, t2), t3) in list(coercions.items()))
 
 def coerce_types(t1, t2):
     if t1 == t2: return t1
@@ -232,7 +218,7 @@ def are_comparable_types(t1, t2, op='=='):
     tt2 = type(t2)
 
     t12 = {t1, t2}
-    if Json in t12 and t12 < {Json, str, unicode, int, bool, float}:
+    if Json in t12 and t12 < {Json, str, str, int, bool, float}:
         return True
     if op in ('in', 'not in'):
         if tt2 is RawSQLType: return True
@@ -245,7 +231,7 @@ def are_comparable_types(t1, t2, op='=='):
     if tt1 is tuple:
         if not tt2 is tuple: return False
         if len(t1) != len(t2): return False
-        for item1, item2 in izip(t1, t2):
+        for item1, item2 in zip(t1, t2):
             if not are_comparable_types(item1, item2): return False
         return True
     if tt1 is RawSQLType or tt2 is RawSQLType: return True
@@ -256,8 +242,8 @@ def are_comparable_types(t1, t2, op='=='):
             if t1 is t2: return True
             if (t1, t2) in coercions: return True
             if tt1 is not type or tt2 is not type: return False
-            if issubclass(t1, int_types) and issubclass(t2, basestring): return True
-            if issubclass(t2, int_types) and issubclass(t1, basestring): return True
+            if issubclass(t1, int_types) and issubclass(t2, str): return True
+            if issubclass(t2, int_types) and issubclass(t1, str): return True
             return False
         if tt1.__name__ == tt2.__name__ == 'EntityMeta':
             return t1._root_ is t2._root_
@@ -284,13 +270,13 @@ class TrackedValue(object):
         assert False, 'Abstract method'  # pragma: no cover
 
 def tracked_method(func):
-    @wraps(func, assigned=('__name__', '__doc__') if PY2 else WRAPPER_ASSIGNMENTS)
+    @wraps(func)
     def new_func(self, *args, **kwargs):
         obj = self.obj_ref()
         attr = self.attr
         if obj is not None:
             args = tuple(TrackedValue.make(obj, attr, arg) for arg in args)
-            if kwargs: kwargs = {key: TrackedValue.make(obj, attr, value) for key, value in iteritems(kwargs)}
+            if kwargs: kwargs = {key: TrackedValue.make(obj, attr, value) for key, value in kwargs.items()}
         result = func(self, *args, **kwargs)
         self._changed_()
         return result
@@ -299,7 +285,7 @@ def tracked_method(func):
 class TrackedDict(TrackedValue, dict):
     def __init__(self, obj, attr, value):
         TrackedValue.__init__(self, obj, attr)
-        dict.__init__(self, {key: self.make(obj, attr, val) for key, val in iteritems(value)})
+        dict.__init__(self, {key: self.make(obj, attr, val) for key, val in value.items()})
     def __reduce__(self):
         return dict, (dict(self),)
     __setitem__ = tracked_method(dict.__setitem__)
@@ -331,18 +317,13 @@ class TrackedList(TrackedValue, list):
     insert = tracked_method(list.insert)
     reverse = tracked_method(list.reverse)
     sort = tracked_method(list.sort)
-    if PY2:
-        __setslice__ = tracked_method(list.__setslice__)
-    else:
-        clear = tracked_method(list.clear)
+    clear = tracked_method(list.clear)
     def get_untracked(self):
         return [val.get_untracked() if isinstance(val, TrackedValue) else val for val in self]
 
 def validate_item(item_type, item):
-    if PY2 and isinstance(item, str):
-        item = item.decode('ascii')
     if not isinstance(item, item_type):
-        if item_type is not unicode and hasattr(item, '__index__'):
+        if item_type is not str and hasattr(item, '__index__'):
             return item.__index__()
         throw(TypeError, 'Cannot store %r item in array of %r' % (type(item).__name__, item_type.__name__))
     return item
@@ -365,7 +346,7 @@ class TrackedArray(TrackedList):
         TrackedList.__setitem__(self, index, item)
 
     def __contains__(self, item):
-        if not isinstance(item, basestring) and hasattr(item, '__iter__'):
+        if not isinstance(item, str) and hasattr(item, '__iter__'):
             return all(it in set(self) for it in item)
         return list.__contains__(self, item)
 
@@ -396,7 +377,7 @@ class IntArray(Array):
 
 
 class StrArray(Array):
-    item_type = unicode
+    item_type = str
 
 
 class FloatArray(Array):
@@ -404,14 +385,14 @@ class FloatArray(Array):
 
 
 numeric_types = {bool, int, float, Decimal}
-comparable_types = {int, float, Decimal, unicode, date, time, datetime, timedelta, bool, UUID, IntArray, StrArray, FloatArray}
+comparable_types = {int, float, Decimal, str, date, time, datetime, timedelta, bool, UUID, IntArray, StrArray, FloatArray}
 primitive_types = comparable_types | {buffer}
 function_types = {type, types.FunctionType, types.BuiltinFunctionType}
-type_normalization_dict = { long : int } if PY2 else {}
+type_normalization_dict = {}
 
 array_types = {
     int: IntArray,
     float: FloatArray,
-    unicode: StrArray
+    str: StrArray
 }
 

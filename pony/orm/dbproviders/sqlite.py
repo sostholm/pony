@@ -1,12 +1,10 @@
 from __future__ import absolute_import
-from pony.py23compat import PY2, imap, basestring, buffer, int_types, unicode
+from pony.py23compat import buffer, int_types
 
-import os.path, sys, re, json
+import os, os.path, sys, re, json, datetime, time
 import sqlite3 as sqlite
 from decimal import Decimal
-from datetime import datetime, date, time, timedelta
 from random import random
-from time import strptime
 from threading import Lock
 from uuid import UUID
 from binascii import hexlify
@@ -56,16 +54,15 @@ class SQLiteTranslator(SQLTranslator):
 
 class SQLiteValue(Value):
     __slots__ = []
-    def __unicode__(self):
+    def __str__(self):
         value = self.value
-        if isinstance(value, datetime):
+        if isinstance(value, datetime.datetime):
             return self.quote_str(datetime2timestamp(value))
-        if isinstance(value, date):
+        if isinstance(value, datetime.date):
             return self.quote_str(str(value))
-        if isinstance(value, timedelta):
+        if isinstance(value, datetime.timedelta):
             return repr(value.total_seconds() / (24 * 60 * 60))
-        return Value.__unicode__(self)
-    if not PY2: __str__ = __unicode__
+        return Value.__str__(self)
 
 class SQLiteBuilder(SQLBuilder):
     dialect = 'SQLite'
@@ -87,6 +84,22 @@ class SQLiteBuilder(SQLBuilder):
         if stop is None:
             stop = [ 'VALUE', None ]
         return "py_string_slice(", builder(expr), ', ', builder(start), ', ', builder(stop), ")"
+    def IN(builder, expr1, x):
+        if not x:
+            return '0 = 1'
+        if len(x) >= 1 and x[0] == 'SELECT':
+            return builder(expr1), ' IN ', builder(x)
+        op = ' IN (VALUES ' if expr1[0] == 'ROW' else ' IN ('
+        expr_list = [ builder(expr) for expr in x ]
+        return builder(expr1), op, join(', ', expr_list), ')'
+    def NOT_IN(builder, expr1, x):
+        if not x:
+            return '1 = 1'
+        if len(x) >= 1 and x[0] == 'SELECT':
+            return builder(expr1), ' NOT IN ', builder(x)
+        op = ' NOT IN (VALUES ' if expr1[0] == 'ROW' else ' NOT IN ('
+        expr_list = [ builder(expr) for expr in x ]
+        return builder(expr1), op, join(', ', expr_list), ')'
     def TODAY(builder):
         return "date('now', 'localtime')"
     def NOW(builder):
@@ -104,7 +117,7 @@ class SQLiteBuilder(SQLBuilder):
     def SECOND(builder, expr):
         return 'cast(substr(', builder(expr), ', 18, 2) as integer)'
     def datetime_add(builder, funcname, expr, td):
-        assert isinstance(td, timedelta)
+        assert isinstance(td, datetime.timedelta)
         modifiers = []
         seconds = td.seconds + td.days * 24 * 3600
         sign = '+' if seconds > 0 else '-'
@@ -126,21 +139,21 @@ class SQLiteBuilder(SQLBuilder):
         if not modifiers: return builder(expr)
         return funcname, '(', builder(expr), modifiers, ')'
     def DATE_ADD(builder, expr, delta):
-        if delta[0] == 'VALUE' and isinstance(delta[1], timedelta):
+        if delta[0] == 'VALUE' and isinstance(delta[1], datetime.timedelta):
             return builder.datetime_add('date', expr, delta[1])
         return 'datetime(julianday(', builder(expr), ') + ', builder(delta), ')'
     def DATE_SUB(builder, expr, delta):
-        if delta[0] == 'VALUE' and isinstance(delta[1], timedelta):
+        if delta[0] == 'VALUE' and isinstance(delta[1], datetime.timedelta):
             return builder.datetime_add('date', expr, -delta[1])
         return 'datetime(julianday(', builder(expr), ') - ', builder(delta), ')'
     def DATE_DIFF(builder, expr1, expr2):
         return 'julianday(', builder(expr1), ') - julianday(', builder(expr2), ')'
     def DATETIME_ADD(builder, expr, delta):
-        if delta[0] == 'VALUE' and isinstance(delta[1], timedelta):
+        if delta[0] == 'VALUE' and isinstance(delta[1], datetime.timedelta):
             return builder.datetime_add('datetime', expr, delta[1])
         return 'datetime(julianday(', builder(expr), ') + ', builder(delta), ')'
     def DATETIME_SUB(builder, expr, delta):
-        if delta[0] == 'VALUE' and isinstance(delta[1], timedelta):
+        if delta[0] == 'VALUE' and isinstance(delta[1], datetime.timedelta):
             return builder.datetime_add('datetime', expr, -delta[1])
         return 'datetime(julianday(', builder(expr), ') - ', builder(delta), ')'
     def DATETIME_DIFF(builder, expr1, expr2):
@@ -159,7 +172,7 @@ class SQLiteBuilder(SQLBuilder):
         fname = 'json_extract' if builder.json1_available else 'py_json_extract'
         path_sql, has_params, has_wildcards = builder.build_json_path(path)
         return 'py_json_unwrap(', fname, '(', builder(expr), ', null, ', path_sql, '))'
-    json_value_type_mapping = {unicode: 'text', bool: 'integer', int: 'integer', float: 'real'}
+    json_value_type_mapping = {str: 'text', bool: 'integer', int: 'integer', float: 'real'}
     def JSON_VALUE(builder, expr, path, type):
         func_name = 'json_extract' if builder.json1_available else 'py_json_extract'
         path_sql, has_params, has_wildcards = builder.build_json_path(path)
@@ -218,8 +231,8 @@ class SQLiteDecimalConverter(dbapiprovider.DecimalConverter):
 class SQLiteDateConverter(dbapiprovider.DateConverter):
     def sql2py(converter, val):
         try:
-            time_tuple = strptime(val[:10], '%Y-%m-%d')
-            return date(*time_tuple[:3])
+            time_tuple = time.strptime(val[:10], '%Y-%m-%d')
+            return datetime.date(*time_tuple[:3])
         except: return val
     def py2sql(converter, val):
         return val.strftime('%Y-%m-%d')
@@ -229,14 +242,14 @@ class SQLiteTimeConverter(dbapiprovider.TimeConverter):
         try:
             if len(val) <= 8: dt = datetime.strptime(val, '%H:%M:%S')
             else: dt = datetime.strptime(val, '%H:%M:%S.%f')
-            return dt.time()
+            return dt.datetime.time()
         except: return val
     def py2sql(converter, val):
         return val.isoformat()
 
 class SQLiteTimedeltaConverter(dbapiprovider.TimedeltaConverter):
     def sql2py(converter, val):
-        return timedelta(days=val)
+        return datetime.timedelta(days=val)
     def py2sql(converter, val):
         return val.days + (val.seconds + val.microseconds / 1000000.0) / 86400.0
 
@@ -256,7 +269,7 @@ def dumps(items):
 class SQLiteArrayConverter(dbapiprovider.ArrayConverter):
     array_types = {
         int: ('int', SQLiteIntConverter),
-        unicode: ('text', dbapiprovider.StrConverter),
+        str: ('text', dbapiprovider.StrConverter),
         float: ('real', dbapiprovider.RealConverter)
     }
 
@@ -311,21 +324,25 @@ class SQLiteProvider(DBAPIProvider):
     converter_classes = [
         (NoneType, dbapiprovider.NoneConverter),
         (bool, dbapiprovider.BoolConverter),
-        (basestring, dbapiprovider.StrConverter),
+        (str, dbapiprovider.StrConverter),
         (int_types, SQLiteIntConverter),
         (float, dbapiprovider.RealConverter),
         (Decimal, SQLiteDecimalConverter),
-        (datetime, SQLiteDatetimeConverter),
-        (date, SQLiteDateConverter),
-        (time, SQLiteTimeConverter),
-        (timedelta, SQLiteTimedeltaConverter),
+        (datetime.datetime, SQLiteDatetimeConverter),
+        (datetime.date, SQLiteDateConverter),
+        (datetime.time, SQLiteTimeConverter),
+        (datetime.timedelta, SQLiteTimedeltaConverter),
         (UUID, dbapiprovider.UuidConverter),
         (buffer, dbapiprovider.BlobConverter),
         (Json, SQLiteJsonConverter)
     ]
 
-    def __init__(provider, *args, **kwargs):
-        DBAPIProvider.__init__(provider, *args, **kwargs)
+    def __init__(provider, database, filename, **kwargs):
+        is_shared_memory_db = filename == ':sharedmemory:'
+        if is_shared_memory_db:
+            filename = "file:memdb%d_%s?mode=memory&cache=shared" % (database.id, os.urandom(8).hex())
+            kwargs["uri"] = True
+        DBAPIProvider.__init__(provider, database, is_shared_memory_db, filename, **kwargs)
         provider.pre_transaction_lock = Lock()
         provider.transaction_lock = Lock()
 
@@ -421,8 +438,10 @@ class SQLiteProvider(DBAPIProvider):
                     raise
         DBAPIProvider.release(provider, connection, cache)
 
-    def get_pool(provider, filename, create_db=False, **kwargs):
-        if filename != ':memory:':
+    def get_pool(provider, is_shared_memory_db, filename, create_db=False, **kwargs):
+        if is_shared_memory_db or filename == ':memory:':
+            pass
+        else:
             # When relative filename is specified, it is considered
             # not relative to cwd, but to user module where
             # Database instance is created
@@ -437,7 +456,7 @@ class SQLiteProvider(DBAPIProvider):
             # 1 - SQLiteProvider.__init__()
             # 0 - pony.dbproviders.sqlite.get_pool()
             filename = absolutize_path(filename, frame_depth=cut_traceback_depth+5)
-        return SQLitePool(filename, create_db, **kwargs)
+        return SQLitePool(is_shared_memory_db, filename, create_db, **kwargs)
 
     def table_exists(provider, connection, table_name, case_sensitive=True):
         return provider._exists(connection, table_name, None, case_sensitive)
@@ -487,18 +506,18 @@ def make_string_function(name, base_func):
         if value is None:
             return None
         t = type(value)
-        if t is not unicode:
+        if t is not str:
             if t is buffer:
                 value = hexlify(value).decode('ascii')
             else:
-                value = unicode(value)
+                value = str(value)
         result = base_func(value)
         return result
     func.__name__ = name
     return func
 
-py_upper = make_string_function('py_upper', unicode.upper)
-py_lower = make_string_function('py_lower', unicode.lower)
+py_upper = make_string_function('py_upper', str.upper)
+py_lower = make_string_function('py_lower', str.lower)
 
 def py_json_unwrap(value):
     # [null,some-value] -> some-value
@@ -515,7 +534,7 @@ def _parse_path(path):
     if path in path_cache:
         return path_cache[path]
     keys = None
-    if isinstance(path, basestring) and path.startswith('$'):
+    if isinstance(path, str) and path.startswith('$'):
         keys = []
         pos = 1
         path_len = len(path)
@@ -542,7 +561,7 @@ def _traverse(obj, keys):
     return obj
 
 def _extract(expr, *paths):
-    expr = json.loads(expr) if isinstance(expr, basestring) else expr
+    expr = json.loads(expr) if isinstance(expr, str) else expr
     result = []
     for path in paths:
         keys = _parse_path(path)
@@ -567,19 +586,19 @@ def py_json_value(expr, path):
     return result if type(result) not in (list, dict) else None
 
 def py_json_contains(expr, path, key):
-    expr = json.loads(expr) if isinstance(expr, basestring) else expr
+    expr = json.loads(expr) if isinstance(expr, str) else expr
     keys = _parse_path(path)
     expr = _traverse(expr, keys)
     return type(expr) in (list, dict) and key in expr
 
 def py_json_nonzero(expr, path):
-    expr = json.loads(expr) if isinstance(expr, basestring) else expr
+    expr = json.loads(expr) if isinstance(expr, str) else expr
     keys = _parse_path(path)
     expr = _traverse(expr, keys)
     return bool(expr)
 
 def py_json_array_length(expr, path=None):
-    expr = json.loads(expr) if isinstance(expr, basestring) else expr
+    expr = json.loads(expr) if isinstance(expr, str) else expr
     if path:
         keys = _parse_path(path)
         expr = _traverse(expr, keys)
@@ -625,22 +644,26 @@ def py_make_array(*items):
 def py_string_slice(s, start, end):
     if s is None:
         return None
-    if isinstance(start, basestring):
+    if isinstance(start, str):
         start = int(start)
-    if isinstance(end, basestring):
+    if isinstance(end, str):
         end = int(end)
     return s[start:end]
 
 class SQLitePool(Pool):
-    def __init__(pool, filename, create_db, **kwargs): # called separately in each thread
+    def __init__(pool, is_shared_memory_db, filename, create_db, **kwargs): # called separately in each thread
+        pool.is_shared_memory_db = is_shared_memory_db
         pool.filename = filename
         pool.create_db = create_db
         pool.kwargs = kwargs
         pool.con = None
     def _connect(pool):
         filename = pool.filename
-        if filename != ':memory:' and not pool.create_db and not os.path.exists(filename):
+        if pool.is_shared_memory_db or pool.filename == ':memory:':
+            pass
+        elif not pool.create_db and not os.path.exists(filename):
             throw(IOError, "Database file is not found: %r" % filename)
+
         pool.con = con = sqlite.connect(filename, isolation_level=None, **pool.kwargs)
         con.text_factory = _text_factory
 
@@ -672,10 +695,12 @@ class SQLitePool(Pool):
 
         con.execute('PRAGMA case_sensitive_like = true')
     def disconnect(pool):
-        if pool.filename != ':memory:':
+        if pool.is_shared_memory_db or pool.filename == ':memory:':
+            pass
+        else:
             Pool.disconnect(pool)
     def drop(pool, con):
-        if pool.filename != ':memory:':
-            Pool.drop(pool, con)
-        else:
+        if pool.is_shared_memory_db or pool.filename == ':memory:':
             con.rollback()
+        else:
+            Pool.drop(pool, con)

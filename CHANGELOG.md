@@ -1,6 +1,51 @@
+# PonyORM release 0.7.16 (2022-01-28)
+
+## Bugfixes
+
+* Fixes #628: DBAPIProvider.__init__() got multiple values for argument 'database' 
+
+
+# PonyORM release 0.7.15 (2022-01-27)
+
+## Features
+
+* Add Python 3.10 support, drop support of Python < 3.6
+* You can create an in-memory SQLite database accessible from multiple threads by specifying ":sharedmemory:" as a file name 
+
+## Bugfixes
+
+* Do not perform optimistic checks when deleting an object (it is OK if it was already deleted by concurrent transaction)
+* Validation of int fields should take into account field size and check that the value is fit into the range
+* More tests for hybrid methods added
+* Fix incorrect assertion check `assert t is translator.`
+* Fix aggregated query `sum(x.field for x in previous_query)`
+* #594: Use a clearly synthetic filename when compiling dynamic code to not confuse coverage.py
+* Use DecompileError exception instead of AssertionError when a function cannot be decompiled
+
+
+# PonyORM release 0.7.14 (2020-11-23)
+
+## Features
+
+* Add Python 3.9 support
+* Allow to use kwargs in select: Entity.select(**kwargs) and obj.collection.select(**kwargs), a feature that was announced but actually missed from 0.7.7
+* Add support for volatile collection attributes that don't throw "Phantom object appeared/disappeared" exceptions
+
+## Bugfixes
+
+* Fix negative timedelta conversions
+* Pony should reconnect to PostgreSQL when receiving 57P01 error (AdminShutdown)
+* Allow mixing compatible types (like int and float) in coalesce() arguments
+* Support of subqueries in coalesce() arguments
+* Fix using aggregated subqueries in ORDER BY section
+* Fix queries with expressions like `(x, y) in ((a, b), (c, d))`
+* #451: KeyError for seeds with unique attributes in SessionCache.update_simple_index()
+
+
 # PonyORM release 0.7.13 (2020-03-03)
 
 This release contains no new features or bugfixes. The only reason for this release is to test our CI/CD process.
+
 
 # PonyORM release 0.7.12 (2020-02-04)
 
@@ -15,7 +60,7 @@ This release contains no new features or bugfixes. The only reason for this rele
 * Fix string getitem translation for slices and negative indexes
 * PostgreSQL DISTINCT bug fixed for queries with ORDER BY clause
 * Fix date difference syntax in PostgreSQL
-* Fix casting json to dobule in PostgreSQL
+* Fix casting json to double in PostgreSQL
 * Fix count by several columns in PostgreSQL
 * Fix PostgreSQL MIN and MAX expressions on boolean columns
 * Fix determination of interactive mode in PyCharm
@@ -105,7 +150,7 @@ This release contains no new features or bugfixes. The only reason for this rele
 * #385: test fails with python3.6
 * #386: release unlocked lock error in SQLite
 * #390: TypeError: writable buffers are not hashable
-* #398: add auto coversion of numpy numeric types
+* #398: add auto conversion of numpy numeric types
 * #404: GAE local run detection
 * Fix Flask compatibility: add support of LocalProxy object
 * db_session(sql_debug=True) should log SQL commands also during db_session.__exit__()

@@ -1,21 +1,18 @@
 from __future__ import absolute_import, print_function, division
-from pony.py23compat import PY2, izip, imap, iteritems, itervalues, items_list, values_list, xrange, cmp, \
-                            basestring, unicode, buffer, int_types, builtins, with_metaclass
+from pony.py23compat import cmp, unicode, buffer, int_types
 
-import json, re, sys, types, datetime, logging, itertools, warnings, inspect
+import builtins, json, re, sys, types, datetime, logging, itertools, warnings, inspect, ast
 from operator import attrgetter, itemgetter
 from itertools import chain, starmap, repeat
 from time import time
 from decimal import Decimal
 from random import shuffle, randint, random
-from threading import Lock, RLock, currentThread as current_thread, _MainThread
+from threading import Lock, RLock, current_thread, _MainThread
 from contextlib import contextmanager
 from collections import defaultdict
 from hashlib import md5
 from inspect import isgeneratorfunction
 from functools import wraps
-
-from pony.thirdparty.compiler import ast, parse
 
 import pony
 from pony import options
@@ -91,19 +88,8 @@ sql_logger = logging.getLogger('pony.orm.sql')
 
 orm_log_level = logging.INFO
 
-def has_handlers(logger):
-    if not PY2:
-        return logger.hasHandlers()
-    while logger:
-        if logger.handlers:
-            return True
-        elif not logger.propagate:
-            return False
-        logger = logger.parent
-    return False
-
 def log_orm(msg):
-    if has_handlers(orm_logger):
+    if orm_logger.hasHandlers():
         orm_logger.log(orm_log_level, msg)
     else:
         print(msg)
@@ -111,7 +97,7 @@ def log_orm(msg):
 def log_sql(sql, arguments=None):
     if type(arguments) is list:
         sql = 'EXECUTEMANY (%d)\n%s' % (len(arguments), sql)
-    if has_handlers(sql_logger):
+    if sql_logger.hasHandlers():
         if local.show_values and arguments:
             sql = '%s\n%s' % (sql, format_arguments(arguments))
         sql_logger.log(orm_log_level, sql)
@@ -126,9 +112,9 @@ def format_arguments(arguments):
 
 def args2str(args):
     if isinstance(args, (tuple, list)):
-        return '[%s]' % ', '.join(imap(repr, args))
+        return '[%s]' % ', '.join(map(repr, args))
     elif isinstance(args, dict):
-        return '{%s}' % ', '.join('%s:%s' % (repr(key), repr(val)) for key, val in sorted(iteritems(args)))
+        return '{%s}' % ', '.join('%s:%s' % (repr(key), repr(val)) for key, val in sorted(args.items()))
 
 adapted_sql_cache = {}
 string2ast_cache = {}
@@ -156,7 +142,7 @@ class ObjectNotFound(OrmError):
     def __init__(exc, entity, pkval=None):
         if pkval is not None:
             if type(pkval) is tuple:
-                pkval = ','.join(imap(repr, pkval))
+                pkval = ','.join(map(repr, pkval))
             else: pkval = repr(pkval)
             msg = '%s[%s]' % (entity.__name__, pkval)
         else: msg = entity.__name__
@@ -298,11 +284,11 @@ class PrefetchContext(object):
         result.entities_to_prefetch = self.entities_to_prefetch.copy()
         return result
     def __enter__(self):
-        assert local.prefetch_context is None
-        local.prefetch_context = self
+        local.prefetch_context_stack.append(self)
     def __exit__(self, exc_type, exc_val, exc_tb):
-        assert local.prefetch_context is self
-        local.prefetch_context = None
+        stack = local.prefetch_context_stack
+        assert stack and stack[-1] is self
+        stack.pop()
     def get_frozen_attrs_to_prefetch(self, entity):
         attrs_to_prefetch = self.attrs_to_prefetch_dict.get(entity, ())
         if type(attrs_to_prefetch) is set:
@@ -329,11 +315,16 @@ class Local(localbase):
         local.db2cache = {}
         local.db_context_counter = 0
         local.db_session = None
-        local.prefetch_context = None
+        local.prefetch_context_stack = []
         local.current_user = None
         local.perms_context = None
         local.user_groups_cache = {}
         local.user_roles_cache = defaultdict(dict)
+    @property
+    def prefetch_context(local):
+        if local.prefetch_context_stack:
+            return local.prefetch_context_stack[-1]
+        return None
     def push_debug_state(local, debug, show_values):
         local.debug_stack.append((local.debug, local.show_values))
         if not suppress_debug_change:
@@ -521,7 +512,7 @@ class DBSessionContextManager(object):
 
             exc = tb = None
             try:
-                for i in xrange(db_session.retry+1):
+                for i in range(db_session.retry+1):
                     db_session._enter()
                     exc_type = exc = tb = None
                     try:
@@ -715,7 +706,7 @@ class OnConnectDecorator(object):
     @staticmethod
     def check_provider(provider):
         if provider:
-            if not isinstance(provider, basestring):
+            if not isinstance(provider, str):
                 throw(TypeError, "'provider' option should be type of 'string', got %r" % type(provider).__name__)
             if provider not in known_providers:
                 throw(BindingError, 'Unknown provider %s' % provider)
@@ -728,16 +719,21 @@ class OnConnectDecorator(object):
     def __call__(self, func=None, provider=None):
         if isinstance(func, types.FunctionType):
             self.database._on_connect_funcs.append((func, provider or self.provider))
-        if not provider and func is basestring:
+        if not provider and func is str:
             provider = func
         OnConnectDecorator.check_provider(provider)
         return OnConnectDecorator(self.database, provider)
+
+
+db_id_counter = itertools.count(1)
+
 
 class Database(object):
     def __deepcopy__(self, memo):
         return self  # Database cannot be cloned by deepcopy()
     @cut_traceback
     def __init__(self, *args, **kwargs):
+        self.id = next(db_id_counter)
         # argument 'self' cannot be named 'database', because 'database' can be in kwargs
         self.priority = 0
         self._insert_cache = {}
@@ -780,7 +776,7 @@ class Database(object):
         if isinstance(provider, type) and issubclass(provider, DBAPIProvider):
             provider_cls = provider
         else:
-            if not isinstance(provider, basestring):
+            if not isinstance(provider, str):
                 throw(TypeError, 'Provider name should be string. Got: %r' % type(provider).__name__)
             if provider == 'pygresql': throw(TypeError,
                 'Pony no longer supports PyGreSQL module. Please use psycopg2 instead.')
@@ -788,7 +784,7 @@ class Database(object):
             provider_module = import_module('pony.orm.dbproviders.' + provider)
             provider_cls = provider_module.provider_cls
         kwargs['pony_call_on_connect'] = self.call_on_connect
-        self.provider = provider_cls(*args, **kwargs)
+        self.provider = provider_cls(self, *args, **kwargs)
     @property
     def last_sql(database):
         return database._dblocal.last_sql
@@ -816,14 +812,14 @@ class Database(object):
     def merge_local_stats(database):
         setdefault = database._global_stats.setdefault
         with database._global_stats_lock:
-            for sql, stat in iteritems(database._dblocal.stats):
+            for sql, stat in database._dblocal.stats.items():
                 global_stat = setdefault(sql, stat)
                 if global_stat is not stat: global_stat.merge(stat)
         database._dblocal.stats = {None: QueryStat(None)}
     @property
     def global_stats(database):
         with database._global_stats_lock:
-            return {sql: stat.copy() for sql, stat in iteritems(database._global_stats)}
+            return {sql: stat.copy() for sql, stat in database._global_stats.items()}
     @property
     def global_stats_lock(database):
         deprecated(3, "global_stats_lock is deprecated, just use global_stats property without any locking")
@@ -923,12 +919,12 @@ class Database(object):
         cached_sql = database._insert_cache.get(query_key)
         if cached_sql is None:
             ast = [ 'INSERT', table_name, kwargs.keys(),
-                    [ [ 'PARAM', (i, None, None) ] for i in xrange(len(kwargs)) ], returning ]
+                    [ [ 'PARAM', (i, None, None) ] for i in range(len(kwargs)) ], returning ]
             sql, adapter = database._ast2sql(ast)
             cached_sql = sql, adapter
             database._insert_cache[query_key] = cached_sql
         else: sql, adapter = cached_sql
-        arguments = adapter(values_list(kwargs))  # order of values same as order of keys
+        arguments = adapter(list(kwargs.values()))  # order of values same as order of keys
         if returning is not None:
             return database._exec_sql(sql, arguments, returning_id=True, start_transaction=True)
         cursor = database._exec_sql(sql, arguments, start_transaction=True)
@@ -955,7 +951,6 @@ class Database(object):
             cache.in_transaction = True
         database._update_local_stat(sql, t)
         if not returning_id: return cursor
-        if PY2 and type(new_id) is long: new_id = int(new_id)
         return new_id
     @cut_traceback
     def generate_mapping(database, filename=None, check_tables=True, create_tables=False):
@@ -989,7 +984,7 @@ class Database(object):
             elif table_name is None:
                 table_name = provider.get_default_entity_table_name(entity)
                 entity._table_ = table_name
-            else: assert isinstance(table_name, (basestring, tuple))
+            else: assert isinstance(table_name, (str, tuple))
 
             table = schema.tables.get(table_name)
             if table is None: table = schema.add_table(table_name, entity)
@@ -1024,7 +1019,7 @@ class Database(object):
                         if not attr.table:
                             seq_counter = itertools.count(2)
                             while m2m_table is not None:
-                                if isinstance(table_name, basestring):
+                                if isinstance(table_name, str):
                                     new_table_name = table_name + '_%d' % next(seq_counter)
                                 else:
                                     schema_name, base_name = provider.split_table_name(table_name)
@@ -1042,7 +1037,7 @@ class Database(object):
                         'Different column names should be specified for attributes %s and %s' % (attr, reverse))
                     assert len(m2m_columns_1) == len(reverse.converters)
                     assert len(m2m_columns_2) == len(attr.converters)
-                    for column_name, converter in izip(m2m_columns_1 + m2m_columns_2, reverse.converters + attr.converters):
+                    for column_name, converter in zip(m2m_columns_1 + m2m_columns_2, reverse.converters + attr.converters):
                         m2m_table.add_column(column_name, converter.get_sql_type(), converter, True)
                     m2m_table.add_index(None, tuple(m2m_table.column_list), is_pk=True)
                     m2m_table.m2m.add(attr)
@@ -1070,7 +1065,7 @@ class Database(object):
                     elif columns:
                         if attr.sql_type is not None: throw(NotImplementedError,
                             'sql_type cannot be specified for composite attribute %s' % attr)
-                        for (column_name, converter) in izip(columns, attr.converters):
+                        for (column_name, converter) in zip(columns, attr.converters):
                             table.add_column(column_name, converter.get_sql_type(), converter, not attr.nullable)
                     else: pass  # virtual attribute of one-to-one pair
             entity._attrs_with_columns_ = [ attr for attr in entity._attrs_
@@ -1135,7 +1130,7 @@ class Database(object):
                     if isinstance(attr.py_type, Array) and provider.dialect != 'PostgreSQL':
                         pass  # GIN indexes are supported only in PostgreSQL
                     else:
-                        columns = tuple(imap(table.column_dict.__getitem__, attr.columns))
+                        columns = tuple(map(table.column_dict.__getitem__, attr.columns))
                         table.add_index(attr.index, columns, is_unique=attr.is_unique)
             entity._initialize_bits_()
 
@@ -1159,9 +1154,9 @@ class Database(object):
             else: throw(TypeError, 'Table name cannot be None')
         elif isinstance(table_name, tuple):
             for component in table_name:
-                if not isinstance(component, basestring):
+                if not isinstance(component, str):
                     throw(TypeError, 'Invalid table name component: {}'.format(component))
-        elif isinstance(table_name, basestring):
+        elif isinstance(table_name, str):
             table_name = table_name[:]  # table_name = templating.plainstr(table_name)
         else: throw(TypeError, 'Invalid table name: {}'.format(table_name))
         return table_name
@@ -1180,7 +1175,7 @@ class Database(object):
             if provider.table_exists(connection, table_name): existed_tables.append(table_name)
             elif not if_exists:
                 if try_normalized:
-                    if isinstance(table_name, basestring):
+                    if isinstance(table_name, str):
                         normalized_table_name = provider.normalize_name(table_name)
                     else:
                         schema_name, base_name = provider.split_table_name(table_name)
@@ -1245,7 +1240,7 @@ class Database(object):
                     d['reverse'] = attr.reverse.name
                 if attr.lazy: d['lazy'] = True
                 if attr.nullable: d['nullable'] = True
-                if attr.default and issubclass(type(attr.default), (int_types, basestring)):
+                if attr.default and issubclass(type(attr.default), (int_types, str)):
                     d['defaultValue'] = attr.default
                 attrs.append(d)
             d = dict(name=entity.__name__, newAttrs=attrs, pkAttrs=[ attr.name for attr in entity._pk_attrs_ ])
@@ -1446,10 +1441,10 @@ class Database(object):
 
         def deserialize(x):
             t = type(x)
-            if t is list: return list(imap(deserialize, x))
+            if t is list: return list(map(deserialize, x))
             if t is dict:
                 if '_id_' not in x:
-                    return {key: deserialize(val) for key, val in iteritems(x)}
+                    return {key: deserialize(val) for key, val in x.items()}
                 obj = objmap.get(x['_id_'])
                 if obj is None:
                     entity_name = x['class']
@@ -1486,7 +1481,7 @@ def perm(*args, **kwargs):
 
 def _split_names(typename, names):
     if names is None: return set()
-    if isinstance(names, basestring):
+    if isinstance(names, str):
         names = names.replace(',', ' ').split()
     else:
         try: namelist = list(names)
@@ -1617,7 +1612,7 @@ def get_user_groups(user):
     for cls, func in usergroup_functions:
         if cls is None or isinstance(user, cls):
             groups = func(user)
-            if isinstance(groups, basestring):  # single group name
+            if isinstance(groups, str):  # single group name
                 result.add(groups)
             elif groups is not None:
                 result.update(groups)
@@ -1636,7 +1631,7 @@ def get_user_roles(user, obj):
         if user_cls is None or isinstance(user, user_cls):
             if obj_cls is None or isinstance(obj, obj_cls):
                 roles = func(user, obj)
-                if isinstance(roles, basestring):  # single role name
+                if isinstance(roles, str):  # single role name
                     result.add(roles)
                 elif roles is not None:
                     result.update(roles)
@@ -1653,7 +1648,7 @@ def get_object_labels(obj):
         for obj_cls, func in objlabel_functions:
             if obj_cls is None or isinstance(obj, obj_cls):
                 labels = func(obj)
-                if isinstance(labels, basestring):  # single label name
+                if isinstance(labels, str):  # single label name
                     result.add(labels)
                 elif labels is not None:
                     result.update(labels)
@@ -1861,7 +1856,7 @@ class SessionCache(object):
             else:
                 for obj in cache.objects:
                     obj._dbvals_ = obj._session_cache_ = None
-                    for attr, setdata in iteritems(obj._vals_):
+                    for attr, setdata in obj._vals_.items():
                         if attr.is_collection:
                             if not setdata.is_fully_loaded: obj._vals_[attr] = None
 
@@ -1880,7 +1875,7 @@ class SessionCache(object):
         prev_immediate = cache.immediate
         cache.immediate = True
         try:
-            for i in xrange(50):
+            for i in range(50):
                 if not cache.modified: return
 
                 with cache.flush_disabled():
@@ -1889,12 +1884,12 @@ class SessionCache(object):
 
                     cache.query_results.clear()
                     modified_m2m = cache._calc_modified_m2m()
-                    for attr, (added, removed) in iteritems(modified_m2m):
+                    for attr, (added, removed) in modified_m2m.items():
                         if not removed: continue
                         attr.remove_m2m(removed)
                     for obj in cache.objects_to_save:
                         if obj is not None: obj._save_()
-                    for attr, (added, removed) in iteritems(modified_m2m):
+                    for attr, (added, removed) in modified_m2m.items():
                         if not added: continue
                         attr.add_m2m(added)
 
@@ -1917,7 +1912,7 @@ class SessionCache(object):
             obj._after_save_(status)
     def _calc_modified_m2m(cache):
         modified_m2m = {}
-        for attr, objects in sorted(iteritems(cache.modified_collections),
+        for attr, objects in sorted(cache.modified_collections.items(),
                                     key=lambda pair: (pair[0].entity.__name__, pair[0].name)):
             if not isinstance(attr, Set): throw(NotImplementedError)
             reverse = attr.reverse
@@ -1947,7 +1942,10 @@ class SessionCache(object):
             obj2 = cache_index.setdefault(new_val, obj)
             if obj2 is not obj: throw(CacheIndexError, 'Cannot update %s.%s: %s with key %s already exists'
                                                  % (obj.__class__.__name__, attr.name, obj2, new_val))
-        if old_val is not None: del cache_index[old_val]
+        if old_val is NOT_LOADED:
+            old_val = None
+        if old_val is not None:
+            del cache_index[old_val]
         undo.append((cache_index, old_val, new_val))
     def db_update_simple_index(cache, obj, attr, old_dbval, new_dbval):
         if old_dbval == new_dbval: return
@@ -2037,15 +2035,15 @@ class Attribute(object):
         if attr.is_pk: attr.pk_offset = 0
         else: attr.pk_offset = None
         attr.id = next(attr_id_counter)
-        if not isinstance(py_type, (type, basestring, types.FunctionType, Array)):
+        if not isinstance(py_type, (type, str, types.FunctionType, Array)):
             if py_type is datetime: throw(TypeError,
                 'datetime is the module and cannot be used as attribute type. Use datetime.datetime instead')
             throw(TypeError, 'Incorrect type of attribute: %r' % py_type)
         attr.py_type = py_type
-        attr.is_string = type(py_type) is type and issubclass(py_type, basestring)
+        attr.is_string = type(py_type) is type and issubclass(py_type, str)
         attr.type_has_empty_value = attr.is_string or hasattr(attr.py_type, 'default_empty_value')
         attr.is_collection = isinstance(attr, Collection)
-        attr.is_relation = isinstance(attr.py_type, (EntityMeta, basestring, types.FunctionType))
+        attr.is_relation = isinstance(attr.py_type, (EntityMeta, str, types.FunctionType))
         attr.is_basic = not attr.is_collection and not attr.is_relation
         attr.sql_type = kwargs.pop('sql_type', None)
         attr.entity = attr.name = None
@@ -2055,7 +2053,7 @@ class Attribute(object):
 
         attr.reverse = kwargs.pop('reverse', None)
         if not attr.reverse: pass
-        elif not isinstance(attr.reverse, (basestring, Attribute)):
+        elif not isinstance(attr.reverse, (str, Attribute)):
             throw(TypeError, "Value of 'reverse' option must be name of reverse attribute). Got: %r" % attr.reverse)
         elif not attr.is_relation:
             throw(TypeError, 'Reverse option cannot be set for this type: %r' % attr.py_type)
@@ -2065,14 +2063,14 @@ class Attribute(object):
         if attr.column is not None:
             if attr.columns is not None:
                 throw(TypeError, "Parameters 'column' and 'columns' cannot be specified simultaneously")
-            if not isinstance(attr.column, basestring):
+            if not isinstance(attr.column, str):
                 throw(TypeError, "Parameter 'column' must be a string. Got: %r" % attr.column)
             attr.columns = [ attr.column ]
         elif attr.columns is not None:
             if not isinstance(attr.columns, (tuple, list)):
                 throw(TypeError, "Parameter 'columns' must be a list. Got: %r'" % attr.columns)
             for column in attr.columns:
-                if not isinstance(column, basestring):
+                if not isinstance(column, str):
                     throw(TypeError, "Items of parameter 'columns' must be strings. Got: %r" % attr.columns)
             if len(attr.columns) == 1: attr.column = attr.columns[0]
         else: attr.columns = []
@@ -2124,7 +2122,7 @@ class Attribute(object):
             attr.default = None
 
         sql_default = attr.sql_default
-        if isinstance(sql_default, basestring):
+        if isinstance(sql_default, str):
             if sql_default == '': throw(TypeError,
                 "'sql_default' option value cannot be empty string, "
                 "because it should be valid SQL literal or expression. "
@@ -2140,7 +2138,7 @@ class Attribute(object):
         if attr.py_type == float:
             if attr.is_pk: throw(TypeError, 'PrimaryKey attribute %s cannot be of type float' % attr)
             elif attr.is_unique: throw(TypeError, 'Unique attribute %s cannot be of type float' % attr)
-        if attr.is_volatile and (attr.is_pk or attr.is_collection): throw(TypeError,
+        if attr.is_volatile and attr.is_pk: throw(TypeError,
             '%s attribute %s cannot be volatile' % (attr.__class__.__name__, attr))
 
         if attr.interleave is not None:
@@ -2150,6 +2148,8 @@ class Attribute(object):
                 '`interleave` option value should be True, False or None. Got: %r' % attr.interleave)
     def linked(attr):
         reverse = attr.reverse
+        if reverse.is_volatile:
+            attr.is_volatile = True
         if attr.cascade_delete is None:
             attr.cascade_delete = attr.is_collection and reverse.is_required
         elif attr.cascade_delete:
@@ -2204,8 +2204,8 @@ class Attribute(object):
                     if from_db: return converter.sql2py(val)
                     val = converter.validate(val, obj)
                 except UnicodeDecodeError as e:
-                    throw(ValueError, 'Value for attribute %s cannot be converted to %s: %s'
-                                      % (attr, unicode.__name__, truncate_repr(val)))
+                    throw(ValueError,
+                          'Value for attribute %s cannot be converted to str: %s' % (attr, truncate_repr(val)))
         else:
             rentity = reverse.entity
             if not isinstance(val, rentity):
@@ -2258,10 +2258,10 @@ class Attribute(object):
                 pk_columns = entity._pk_columns_
                 pk_converters = entity._pk_converters_
                 criteria_list = [ [ converter.EQ, [ 'COLUMN', None, column ], [ 'PARAM', (i, None, None), converter ] ]
-                                  for i, (column, converter) in enumerate(izip(pk_columns, pk_converters)) ]
+                                  for i, (column, converter) in enumerate(zip(pk_columns, pk_converters)) ]
                 sql_ast = [ 'SELECT', select_list, from_list, [ 'WHERE' ] + criteria_list ]
                 sql, adapter = database._ast2sql(sql_ast)
-                offsets = tuple(xrange(len(attr.columns)))
+                offsets = tuple(range(len(attr.columns)))
                 attr.lazy_sql_cache = sql, adapter, offsets
             else: sql, adapter, offsets = attr.lazy_sql_cache
             arguments = adapter(obj._get_raw_pkval_())
@@ -2466,7 +2466,7 @@ class Attribute(object):
         return val._get_raw_pkval_()
     def get_columns(attr):
         assert not attr.is_collection
-        assert not isinstance(attr.py_type, basestring)
+        assert not isinstance(attr.py_type, str)
         if attr._columns_checked: return attr.columns
 
         provider = attr.entity._database_.provider
@@ -2514,7 +2514,7 @@ class Attribute(object):
         t = attr.py_type
         if isinstance(t, type): t = t.__name__
         options = []
-        if attr.args: options.append(', '.join(imap(str, attr.args)))
+        if attr.args: options.append(', '.join(map(str, attr.args)))
         if attr.auto: options.append('auto=True')
         for k, v in sorted(attr.kwargs.items()):
             options.append('%s=%r' % (k, v))
@@ -2574,7 +2574,7 @@ class Discriminator(Required):
             except ValueError: throw(TypeError,
                 "Incorrect discriminator value is set for %s attribute '%s' of '%s' type: %r"
                 % (entity.__name__, attr.name, attr.py_type.__name__, discr_value))
-        elif issubclass(attr.py_type, basestring):
+        elif issubclass(attr.py_type, str):
             discr_value = entity._discriminator_ = entity.__name__
         else: throw(TypeError, "Discriminator value for entity %s "
                                "with custom discriminator column '%s' of '%s' type is not set"
@@ -2618,7 +2618,7 @@ class Index(object):
         index.entity = entity
         attrs = index.attrs
         for i, attr in enumerate(index.attrs):
-            if isinstance(attr, basestring):
+            if isinstance(attr, str):
                 try: attr = getattr(entity, attr)
                 except AttributeError: throw(AttributeError,
                     'Entity %s does not have attribute %s' % (entity.__name__, attr))
@@ -2676,7 +2676,7 @@ class PrimaryKey(Required):
         elif len(attrs) == 1:
             attr = attrs[0]
             attr_name = 'something'
-            for key, val in iteritems(cls_dict):
+            for key, val in cls_dict.items():
                 if val is attr: attr_name = key; break
             py_type = attr.py_type
             type_str = py_type.__name__ if type(py_type) is type else repr(py_type)
@@ -2697,11 +2697,11 @@ class Collection(Attribute):
     def __init__(attr, py_type, *args, **kwargs):
         if attr.__class__ is Collection: throw(TypeError, "'Collection' is abstract type")
         table = kwargs.pop('table', None)  # TODO: rename table to link_table or m2m_table
-        if table is not None and not isinstance(table, basestring):
+        if table is not None and not isinstance(table, str):
             if not isinstance(table, (list, tuple)):
                 throw(TypeError, "Parameter 'table' must be a string. Got: %r" % table)
             for name_part in table:
-                if not isinstance(name_part, basestring):
+                if not isinstance(name_part, str):
                     throw(TypeError, 'Each part of table name must be a string. Got: %r' % name_part)
             table = tuple(table)
         attr.table = table
@@ -2714,14 +2714,14 @@ class Collection(Attribute):
         if attr.reverse_column is not None:
             if attr.reverse_columns is not None and attr.reverse_columns != [ attr.reverse_column ]:
                 throw(TypeError, "Parameters 'reverse_column' and 'reverse_columns' cannot be specified simultaneously")
-            if not isinstance(attr.reverse_column, basestring):
+            if not isinstance(attr.reverse_column, str):
                 throw(TypeError, "Parameter 'reverse_column' must be a string. Got: %r" % attr.reverse_column)
             attr.reverse_columns = [ attr.reverse_column ]
         elif attr.reverse_columns is not None:
             if not isinstance(attr.reverse_columns, (tuple, list)):
                 throw(TypeError, "Parameter 'reverse_columns' must be a list. Got: %r" % attr.reverse_columns)
             for reverse_column in attr.reverse_columns:
-                if not isinstance(reverse_column, basestring):
+                if not isinstance(reverse_column, str):
                     throw(TypeError, "Parameter 'reverse_columns' must be a list of strings. Got: %r" % attr.reverse_columns)
             if len(attr.reverse_columns) == 1: attr.reverse_column = attr.reverse_columns[0]
         else: attr.reverse_columns = []
@@ -2777,23 +2777,23 @@ def construct_batchload_criteria_list(alias, columns, converters, batch_size, ro
             return [ 'PARAM', (i, j, None), converter ]
     if batch_size == 1:
         return [ [ converter.EQ, [ 'COLUMN', alias, column ], param(start, j, converter) ]
-                 for j, (column, converter) in enumerate(izip(columns, converters)) ]
+                 for j, (column, converter) in enumerate(zip(columns, converters)) ]
     if len(columns) == 1:
         column = columns[0]
         converter = converters[0]
-        param_list = [ param(i+start, 0, converter) for i in xrange(batch_size) ]
+        param_list = [ param(i+start, 0, converter) for i in range(batch_size) ]
         condition = [ 'IN', [ 'COLUMN', alias, column ], param_list ]
         return [ condition ]
     elif row_value_syntax:
         row = [ 'ROW' ] + [ [ 'COLUMN', alias, column ] for column in columns ]
         param_list = [ [ 'ROW' ] + [ param(i+start, j, converter) for j, converter in enumerate(converters) ]
-                       for i in xrange(batch_size) ]
+                       for i in range(batch_size) ]
         condition = [ 'IN', row, param_list ]
         return [ condition ]
     else:
         conditions = [ [ 'AND' ] + [ [ converter.EQ, [ 'COLUMN', alias, column ], param(i+start, j, converter) ]
-                                     for j, (column, converter) in enumerate(izip(columns, converters)) ]
-                       for i in xrange(batch_size) ]
+                                     for j, (column, converter) in enumerate(zip(columns, converters)) ]
+                       for i in range(batch_size) ]
         return [ [ 'OR' ] + conditions ]
 
 class Set(Collection):
@@ -2838,7 +2838,7 @@ class Set(Collection):
         max_batch_size = database.provider.max_params_count // len(entity._pk_columns_)
         result = set()
         if not reverse.is_collection:
-            for i in xrange(0, len(objects), max_batch_size):
+            for i in range(0, len(objects), max_batch_size):
                 batch = objects[i:i+max_batch_size]
                 sql, adapter, attr_offsets = rentity._construct_batchload_sql_(len(batch), reverse)
                 arguments = adapter(batch)
@@ -2847,7 +2847,7 @@ class Set(Collection):
         else:
             pk_len = len(entity._pk_columns_)
             m2m_dict = defaultdict(set)
-            for i in xrange(0, len(objects), max_batch_size):
+            for i in range(0, len(objects), max_batch_size):
                 batch = objects[i:i+max_batch_size]
                 sql, adapter = attr.construct_sql_m2m(len(batch))
                 arguments = adapter(batch)
@@ -2861,13 +2861,13 @@ class Set(Collection):
                     obj = batch[0]
                     m2m_dict[obj] = {rentity._get_by_raw_pkval_(row) for row in cursor.fetchall()}
 
-                for obj2, items in iteritems(m2m_dict):
+                for obj2, items in m2m_dict.items():
                     setdata2 = obj2._vals_.get(attr)
                     if setdata2 is None: setdata2 = obj2._vals_[attr] = SetData()
                     else:
                         phantoms = setdata2 - items
                         if setdata2.added: phantoms -= setdata2.added
-                        if phantoms: throw(UnrepeatableReadError,
+                        if phantoms and not attr.is_volatile: throw(UnrepeatableReadError,
                             'Phantom object %s disappeared from collection %s.%s'
                             % (safe_repr(phantoms.pop()), safe_repr(obj2), attr.name))
                     items -= setdata2
@@ -2889,7 +2889,8 @@ class Set(Collection):
         assert obj._status_ not in del_statuses
         setdata = obj._vals_.get(attr)
         if setdata is None: setdata = obj._vals_[attr] = SetData()
-        elif setdata.is_fully_loaded: return setdata
+        elif setdata.is_fully_loaded and not attr.is_volatile:
+            return setdata
         entity = attr.entity
         reverse = attr.reverse
         rentity = reverse.entity
@@ -2933,7 +2934,7 @@ class Set(Collection):
         if prefetching:
             pk_index = cache.indexes[entity._pk_attrs_]
             max_batch_size = database.provider.max_params_count // len(entity._pk_columns_)
-            for obj2 in itervalues(pk_index):
+            for obj2 in pk_index.values():
                 if obj2 is obj: continue
                 if obj2._status_ in created_or_deleted_statuses: continue
                 setdata2 = obj2._vals_.get(attr)
@@ -2962,13 +2963,13 @@ class Set(Collection):
                     if items is None: items = d[obj2] = set()
                     items.add(item)
             else: d[obj] = {rentity._get_by_raw_pkval_(row) for row in cursor.fetchall()}
-            for obj2, items in iteritems(d):
+            for obj2, items in d.items():
                 setdata2 = obj2._vals_.get(attr)
                 if setdata2 is None: setdata2 = obj2._vals_[attr] = SetData()
                 else:
                     phantoms = setdata2 - items
                     if setdata2.added: phantoms -= setdata2.added
-                    if phantoms: throw(UnrepeatableReadError,
+                    if phantoms and not attr.is_volatile: throw(UnrepeatableReadError,
                         'Phantom object %s disappeared from collection %s.%s'
                         % (safe_repr(phantoms.pop()), safe_repr(obj2), attr.name))
                 items -= setdata2
@@ -3125,7 +3126,7 @@ class Set(Collection):
         for obj in objects:
             setdata = obj._vals_.get(attr)
             if setdata is None: setdata = obj._vals_[attr] = SetData()
-            elif setdata.is_fully_loaded: throw(UnrepeatableReadError,
+            elif setdata.is_fully_loaded and not attr.is_volatile: throw(UnrepeatableReadError,
                 'Phantom object %s appeared in collection %s.%s' % (safe_repr(item), safe_repr(obj), attr.name))
             setdata.add(item)
     def reverse_remove(attr, objects, item, undo_funcs):
@@ -3213,7 +3214,7 @@ class Set(Collection):
             else:
                 columns = reverse.columns + attr.columns
                 converters = reverse.converters + attr.converters
-            for i, (column, converter) in enumerate(izip(columns, converters)):
+            for i, (column, converter) in enumerate(zip(columns, converters)):
                 where_list.append([ converter.EQ, ['COLUMN', None, column], [ 'PARAM', (i, None, None), converter ] ])
             from_ast = [ 'FROM', [ None, 'TABLE', attr.table ] ]
             sql_ast = [ 'DELETE', None, from_ast, where_list ]
@@ -3310,7 +3311,7 @@ class SetInstance(object):
     def __str__(wrapper):
         cache = wrapper._obj_._session_cache_
         if cache is None or not cache.is_alive: content = '...'
-        else: content = ', '.join(imap(str, wrapper))
+        else: content = ', '.join(map(str, wrapper))
         return '%s([%s])' % (wrapper.__class__.__name__, content)
     @cut_traceback
     def __nonzero__(wrapper):
@@ -3341,7 +3342,7 @@ class SetInstance(object):
         cached_sql = attr.cached_empty_sql
         if cached_sql is None:
             where_list = [ 'WHERE' ]
-            for i, (column, converter) in enumerate(izip(reverse.columns, reverse.converters)):
+            for i, (column, converter) in enumerate(zip(reverse.columns, reverse.converters)):
                 where_list.append([ converter.EQ, [ 'COLUMN', None, column ], [ 'PARAM', (i, None, None), converter ] ])
             if not reverse.is_collection:
                 table_name = rentity._table_
@@ -3395,7 +3396,7 @@ class SetInstance(object):
         cached_sql = attr.cached_count_sql
         if cached_sql is None:
             where_list = [ 'WHERE' ]
-            for i, (column, converter) in enumerate(izip(reverse.columns, reverse.converters)):
+            for i, (column, converter) in enumerate(zip(reverse.columns, reverse.converters)):
                 where_list.append([ converter.EQ, [ 'COLUMN', None, column ], [ 'PARAM', (i, None, None), converter ] ])
             if not reverse.is_collection: table_name = reverse.entity._table_
             else: table_name = attr.table
@@ -3569,7 +3570,7 @@ class SetInstance(object):
     def load(wrapper):
         wrapper._attr_.load(wrapper._obj_)
     @cut_traceback
-    def select(wrapper, *args):
+    def select(wrapper, *args, **kwargs):
         obj = wrapper._obj_
         if obj._status_ in del_statuses: throw_object_was_deleted(obj)
         attr = wrapper._attr_
@@ -3578,8 +3579,10 @@ class SetInstance(object):
         s = 'lambda item: JOIN(obj in item.%s)' if reverse.is_collection else 'lambda item: item.%s == obj'
         query = query.filter(s % reverse.name, {'obj' : obj, 'JOIN': JOIN})
         if args:
-            func, globals, locals = get_globals_and_locals(args, kwargs=None, frame_depth=cut_traceback_depth+1)
+            func, globals, locals = get_globals_and_locals(args, kwargs, frame_depth=cut_traceback_depth+1)
             query = query.filter(func, globals, locals)
+        if kwargs:
+            query = query._apply_kwargs(kwargs)
         return query
     filter = select
     def limit(wrapper, limit=None, offset=None):
@@ -3622,7 +3625,7 @@ class Multiset(object):
     def __repr__(multiset):
         cache = multiset._obj_._session_cache_
         if cache is not None and cache.is_alive:
-            size = builtins.sum(itervalues(multiset._items_))
+            size = builtins.sum(multiset._items_.values())
             if size == 1: size_str = ' (1 item)'
             else: size_str = ' (%d items)' % size
         else: size_str = ''
@@ -3630,7 +3633,7 @@ class Multiset(object):
                                  '.'.join(multiset._attrnames_), size_str)
     @cut_traceback
     def __str__(multiset):
-        items_str = '{%s}' % ', '.join('%r: %r' % pair for pair in sorted(iteritems(multiset._items_)))
+        items_str = '{%s}' % ', '.join('%r: %r' % pair for pair in sorted(multiset._items_.items()))
         return '%s(%s)' % (multiset.__class__.__name__, items_str)
     @cut_traceback
     def __nonzero__(multiset):
@@ -3640,8 +3643,8 @@ class Multiset(object):
         return builtins.sum(multiset._items_.values())
     @cut_traceback
     def __iter__(multiset):
-        for item, cnt in iteritems(multiset._items_):
-            for i in xrange(cnt): yield item
+        for item, cnt in multiset._items_.items():
+            for i in range(cnt): yield item
     @cut_traceback
     def __eq__(multiset, other):
         if isinstance(other, Multiset):
@@ -3668,7 +3671,7 @@ class EntityIter(object):
     def next(self):
         throw(TypeError, 'Use select(...) function or %s.select(...) method for iteration'
                          % self.entity.__name__)
-    if not PY2: __next__ = next
+    __next__ = next
 
 entity_id_counter = itertools.count(1)
 new_instance_id_counter = itertools.count(1)
@@ -3747,7 +3750,7 @@ class EntityMeta(type):
         entity._base_attrs_ = base_attrs
 
         new_attrs = []
-        for name, attr in items_list(entity.__dict__):
+        for name, attr in list(entity.__dict__.items()):
             if name in base_attrs_dict: throw(ERDiagramError, "Name '%s' hides base attribute %s" % (name,base_attrs_dict[name]))
             if not isinstance(attr, Attribute): continue
             if name.startswith('_') and name.endswith('_'): throw(ERDiagramError,
@@ -3831,11 +3834,11 @@ class EntityMeta(type):
         try: table_name = entity.__dict__['_table_']
         except KeyError: entity._table_ = None
         else:
-            if not isinstance(table_name, basestring):
+            if not isinstance(table_name, str):
                 if not isinstance(table_name, (list, tuple)): throw(TypeError,
                     '%s._table_ property must be a string. Got: %r' % (entity.__name__, table_name))
                 for name_part in table_name:
-                    if not isinstance(name_part, basestring):throw(TypeError,
+                    if not isinstance(name_part, str):throw(TypeError,
                         'Each part of table name must be a string. Got: %r' % name_part)
                 entity._table_ = table_name = tuple(table_name)
 
@@ -3865,9 +3868,12 @@ class EntityMeta(type):
             ''.join(letter for letter in entity.__name__ if letter.isupper()).lower()
             or entity.__name__
             )
-        for_expr = ast.GenExprFor(ast.AssName(iter_name, 'OP_ASSIGN'), ast.Name('.0'), [])
-        inner_expr = ast.GenExprInner(ast.Name(iter_name), [ for_expr ])
-        entity._default_genexpr_ = inner_expr
+        comprehension = ast.comprehension(
+            target=ast.Name(iter_name, ast.Store()),
+            iter=ast.Name('.0', ast.Load()),
+            ifs=[]
+        )
+        entity._default_genexpr_ = ast.GeneratorExp(ast.Name(iter_name, ast.Load()), [comprehension])
 
         entity._access_rules_ = defaultdict(set)
     def _initialize_bits_(entity):
@@ -3890,7 +3896,7 @@ class EntityMeta(type):
         database = entity._database_
         for attr in entity._new_attrs_:
             py_type = attr.py_type
-            if isinstance(py_type, basestring):
+            if isinstance(py_type, str):
                 rentity = database.entities.get(py_type)
                 if rentity is None:
                     throw(ERDiagramError, 'Entity definition %s was not found' % py_type)
@@ -3914,7 +3920,7 @@ class EntityMeta(type):
                                    'Entities %s and %s belongs to different databases'
                                    % (entity.__name__, entity2.__name__))
             reverse = attr.reverse
-            if isinstance(reverse, basestring):
+            if isinstance(reverse, str):
                 attr2 = getattr(entity2, reverse, None)
                 if attr2 is None: throw(ERDiagramError, 'Reverse attribute %s.%s not found' % (entity2.__name__, reverse))
             elif isinstance(reverse, Attribute):
@@ -3981,7 +3987,7 @@ class EntityMeta(type):
     def __getitem__(entity, key):
         if type(key) is not tuple: key = (key,)
         if len(key) == len(entity._pk_attrs_):
-            kwargs = {attr.name: value for attr, value in izip(entity._pk_attrs_, key)}
+            kwargs = {attr.name: value for attr, value in zip(entity._pk_attrs_, key)}
             return entity._find_one_(kwargs)
         if len(key) == len(entity._pk_columns_):
             return entity._get_by_raw_pkval_(key, from_db=False, seed=False)
@@ -4017,8 +4023,12 @@ class EntityMeta(type):
         assert len(objects) == 1
         return objects[0]
     @cut_traceback
-    def select(entity, *args):
-        return entity._query_from_args_(args, kwargs=None, frame_depth=cut_traceback_depth+1)
+    def select(entity, *args, **kwargs):
+        if args: query = entity._query_from_args_(args, kwargs, frame_depth=cut_traceback_depth+1)
+        else:
+            query = entity._select_all()
+            if kwargs: query = query._apply_kwargs(kwargs)
+        return query
     @cut_traceback
     def select_by_sql(entity, sql, globals=None, locals=None):
         return entity._find_by_sql_(None, sql, globals, locals, frame_depth=cut_traceback_depth+1)
@@ -4048,10 +4058,10 @@ class EntityMeta(type):
         result = []
         tried_ids = set()
         found_in_cache = False
-        for i in xrange(5):
+        for i in range(5):
             ids = []
             n = (limit - len(result)) * (i+1)
-            for j in xrange(n * 2):
+            for j in range(n * 2):
                 id = randint(1, max_id)
                 if id in tried_ids: continue
                 if id in ids: continue
@@ -4089,12 +4099,12 @@ class EntityMeta(type):
             throw(ERDiagramError, 'Mapping is not generated for entity %r' % entity.__name__)
         avdict = {}
         get_attr = entity._adict_.get
-        for name, val in iteritems(kwargs):
+        for name, val in kwargs.items():
             attr = get_attr(name)
             if attr is None: throw(TypeError, 'Unknown attribute %r' % name)
             avdict[attr] = attr.validate(val, None, entity, from_db=False)
         if entity._pk_is_composite_:
-            pkval = tuple(imap(avdict.get, entity._pk_attrs_))
+            pkval = tuple(map(avdict.get, entity._pk_attrs_))
             if None in pkval: pkval = None
         else: pkval = avdict.get(entity._pk_attrs_[0])
         for attr in avdict:
@@ -4130,7 +4140,7 @@ class EntityMeta(type):
                 obj = cache_index.get(vals)
                 if obj is not None: break
         if obj is None:
-            for attr, val in iteritems(avdict):
+            for attr, val in avdict.items():
                 if val is None: continue
                 reverse = attr.reverse
                 if reverse and not reverse.is_collection:
@@ -4146,7 +4156,7 @@ class EntityMeta(type):
                     if obj in seeds: obj._load_()
                 if not isinstance(obj, entity): throw(ObjectNotFound, entity, pkval)
             if obj._status_ == 'marked_to_delete': throw(ObjectNotFound, entity, pkval)
-            for attr, val in iteritems(avdict):
+            for attr, val in avdict.items():
                 if val != attr.__get__(obj): throw(ObjectNotFound, entity, pkval)
             if for_update and obj not in cache.for_update:
                 return None, unique  # object is found, but it is not locked
@@ -4155,7 +4165,7 @@ class EntityMeta(type):
         return None, unique
     def _find_in_db_(entity, avdict, unique=False, for_update=False, nowait=False, skip_locked=False):
         database = entity._database_
-        query_attrs = {attr: value is None for attr, value in iteritems(avdict)}
+        query_attrs = {attr: value is None for attr, value in avdict.items()}
         limit = 2 if not unique else None
         sql, adapter, attr_offsets = entity._construct_sql_(query_attrs, False, limit, for_update, nowait, skip_locked)
         arguments = adapter(avdict)
@@ -4164,7 +4174,7 @@ class EntityMeta(type):
         objects = entity._fetch_objects(cursor, attr_offsets, 1, for_update, avdict)
         return objects[0] if objects else None
     def _find_by_sql_(entity, max_fetch_count, sql, globals, locals, frame_depth):
-        if not isinstance(sql, basestring): throw(TypeError)
+        if not isinstance(sql, str): throw(TypeError)
         database = entity._database_
         cursor = database._exec_raw_sql(sql, globals, locals, frame_depth+1)
 
@@ -4180,7 +4190,7 @@ class EntityMeta(type):
                 used_columns.add(offset)
             else: attr_offsets[attr] = offsets
         if len(used_columns) < len(col_names):
-            for i in xrange(len(col_names)):
+            for i in range(len(col_names)):
                 if i not in used_columns: throw(NameError,
                     'Column %s does not belong to entity %s' % (cursor.description[i][0], entity.__name__))
         for attr in entity._pk_attrs_:
@@ -4264,7 +4274,7 @@ class EntityMeta(type):
                     for column in attr.columns:
                         where_list.append([ 'IS_NULL', [ 'COLUMN', None, column ] ])
                 else:
-                    for j, (column, converter) in enumerate(izip(attr.columns, attr_entity._pk_converters_)):
+                    for j, (column, converter) in enumerate(zip(attr.columns, attr_entity._pk_converters_)):
                         where_list.append([ converter.EQ, [ 'COLUMN', None, column ], [ 'PARAM', (attr, None, j), converter ] ])
 
         if not for_update: sql_ast = [ 'SELECT', select_list, from_list, where_list ]
@@ -4307,7 +4317,7 @@ class EntityMeta(type):
             if wbits is None: continue
             rbits = get_rbits(obj.__class__)
             if rbits is None:
-                rbits = sum(obj._bits_except_volatile_.get(attr, 0) for attr in attrs)
+                rbits = builtins.sum(obj._bits_except_volatile_.get(attr, 0) for attr in attrs)
                 rbits_dict[obj.__class__] = rbits
             obj._rbits_ |= rbits & ~wbits
     def _parse_row_(entity, row, attr_offsets):
@@ -4319,7 +4329,7 @@ class EntityMeta(type):
             discr_offset = attr_offsets[discr_attr][0]
             discr_value = discr_attr.validate(row[discr_offset], None, entity, from_db=True)
             real_entity_subclass = discr_attr.code2cls[discr_value]
-            discr_value = real_entity_subclass._discriminator_  # To convert unicode to str in Python 2.x
+            discr_value = real_entity_subclass._discriminator_  # To convert str to str in Python 2.x
 
         database = entity._database_
         cache = local.db2cache[database]
@@ -4360,20 +4370,20 @@ class EntityMeta(type):
     def _select_all(entity):
         return Query(entity._default_iter_name_, entity._default_genexpr_, {}, { '.0' : entity })
     def _query_from_args_(entity, args, kwargs, frame_depth):
-        if not args and not kwargs: return entity._select_all()
+        assert args
         func, globals, locals = get_globals_and_locals(args, kwargs, frame_depth+1)
 
         if type(func) is types.FunctionType:
             names = get_lambda_args(func)
-            code_key = id(func.func_code if PY2 else func.__code__)
+            code_key = id(func.__code__)
             cond_expr, external_names, cells = decompile(func)
-        elif isinstance(func, basestring):
+        elif isinstance(func, str):
             code_key = func
             lambda_ast = string2ast(func)
             if not isinstance(lambda_ast, ast.Lambda):
                 throw(TypeError, 'Lambda function is expected. Got: %s' % func)
             names = get_lambda_args(lambda_ast)
-            cond_expr = lambda_ast.code
+            cond_expr = lambda_ast.body
             cells = None
         else: assert False  # pragma: no cover
 
@@ -4382,9 +4392,10 @@ class EntityMeta(type):
             'Got: %d parameters' % (entity.__name__, entity.__name__[0].lower(), len(names)))
         name = names[0]
 
-        if_expr = ast.GenExprIf(cond_expr)
-        for_expr = ast.GenExprFor(ast.AssName(name, 'OP_ASSIGN'), ast.Name('.0'), [ if_expr ])
-        inner_expr = ast.GenExprInner(ast.Name(name), [ for_expr ])
+        for_expr = ast.comprehension(
+            target=ast.Name(name, ast.Store()), iter=ast.Name('.0', ast.Load()), ifs=[cond_expr])
+        inner_expr = ast.GeneratorExp(elt=ast.Name(name, ast.Load()), generators=[for_expr])
+
         locals = locals.copy() if locals is not None else {}
         locals['.0'] = entity
         return Query(code_key, inner_expr, globals, locals, cells)
@@ -4424,7 +4435,7 @@ class EntityMeta(type):
                     cache_index[pkval] = obj
                     obj._newid_ = None
                 else: obj._newid_ = next(new_instance_id_counter)
-                if obj._pk_is_composite_: pairs = izip(pk_attrs, pkval)
+                if obj._pk_is_composite_: pairs = zip(pk_attrs, pkval)
                 else: pairs = ((pk_attrs[0], pkval),)
                 if status == 'loaded':
                     assert undo_funcs is None
@@ -4536,20 +4547,20 @@ class EntityMeta(type):
     def drop_table(entity, with_all_data=False):
         entity._database_._drop_tables([ entity._table_ ], True, with_all_data)
     def _get_attrs_(entity, only=None, exclude=None, with_collections=False, with_lazy=False):
-        if only and not isinstance(only, basestring): only = tuple(only)
-        if exclude and not isinstance(exclude, basestring): exclude = tuple(exclude)
+        if only and not isinstance(only, str): only = tuple(only)
+        if exclude and not isinstance(exclude, str): exclude = tuple(exclude)
         key = (only, exclude, with_collections, with_lazy)
         attrs = entity._attrnames_cache_.get(key)
         if not attrs:
             attrs = []
             append = attrs.append
             if only:
-                if isinstance(only, basestring): only = only.replace(',', ' ').split()
+                if isinstance(only, str): only = only.replace(',', ' ').split()
                 get_attr = entity._adict_.get
                 for attrname in only:
                     attr = get_attr(attrname)
                     if attr is None: throw(AttributeError,
-                        'Entity %s does not have attriute %s' % (entity.__name__, attrname))
+                        'Entity %s does not have attribute %s' % (entity.__name__, attrname))
                     else: append(attr)
             else:
                 for attr in entity._attrs_:
@@ -4559,10 +4570,10 @@ class EntityMeta(type):
                         if with_lazy: append(attr)
                     else: append(attr)
             if exclude:
-                if isinstance(exclude, basestring): exclude = exclude.replace(',', ' ').split()
+                if isinstance(exclude, str): exclude = exclude.replace(',', ' ').split()
                 for attrname in exclude:
                     if attrname not in entity._adict_: throw(AttributeError,
-                        'Entity %s does not have attriute %s' % (entity.__name__, attrname))
+                        'Entity %s does not have attribute %s' % (entity.__name__, attrname))
                 attrs = (attr for attr in attrs if attr.name not in exclude)
             attrs = tuple(attrs)
             entity._attrnames_cache_[key] = attrs
@@ -4570,7 +4581,7 @@ class EntityMeta(type):
 
 def populate_criteria_list(criteria_list, columns, converters, operations,
                            params_count=0, table_alias=None, optimistic=False):
-    for column, op, converter in izip(columns, operations, converters):
+    for column, op, converter in zip(columns, operations, converters):
         if op == 'IS_NULL':
             criteria_list.append([ op, [ 'COLUMN', None, column ] ])
         else:
@@ -4598,7 +4609,7 @@ def unpickle_entity(d):
     obj = entity._get_from_identity_map_(pkval, 'loaded')
     if obj._status_ in del_statuses: return obj
     avdict = {}
-    for attrname, val in iteritems(d):
+    for attrname, val in d.items():
         attr = entity._adict_[attrname]
         if attr.pk_offset is not None: continue
         avdict[attr] = val
@@ -4666,7 +4677,7 @@ class EntityProxy(object):
         return not self.__eq__(other)
 
 
-class Entity(with_metaclass(EntityMeta)):
+class Entity(object, metaclass=EntityMeta):
     __slots__ = '_session_cache_', '_status_', '_pkval_', '_newid_', '_dbvals_', '_vals_', '_rbits_', '_wbits_', '_save_pos_', '__weakref__'
     def __reduce__(obj):
         if obj._status_ in del_statuses: throw(
@@ -4675,7 +4686,7 @@ class Entity(with_metaclass(EntityMeta)):
             OrmError, '%s object %s has to be stored in DB before it can be pickled'
                       % (obj._status_.capitalize(), safe_repr(obj)))
         d = {'__class__' : obj.__class__}
-        for attr, val in iteritems(obj._vals_):
+        for attr, val in obj._vals_.items():
             if not attr.is_collection: d[attr.name] = val
         return unpickle_entity, (d,)
     @cut_traceback
@@ -4694,7 +4705,7 @@ class Entity(with_metaclass(EntityMeta)):
             val = kwargs.get(attr.name, DEFAULT)
             avdict[attr] = attr.validate(val, obj, from_db=False)
         if entity._pk_is_composite_:
-            pkval = tuple(imap(avdict.get, entity._pk_attrs_))
+            pkval = tuple(map(avdict.get, entity._pk_attrs_))
             if None in pkval: pkval = None
         else: pkval = avdict.get(entity._pk_attrs_[0])
 
@@ -4719,7 +4730,7 @@ class Entity(with_metaclass(EntityMeta)):
                 indexes_update[attrs] = vals
             try:
                 entity._get_from_identity_map_(pkval, 'created', undo_funcs=undo_funcs, obj_to_init=obj)
-                for attr, val in iteritems(avdict):
+                for attr, val in avdict.items():
                     if attr.pk_offset is not None: continue
                     elif not attr.is_collection:
                         obj._vals_[attr] = val
@@ -4729,7 +4740,7 @@ class Entity(with_metaclass(EntityMeta)):
                 for undo_func in reversed(undo_funcs): undo_func()
                 raise
         if pkval is not None: cache_indexes[entity._pk_attrs_][pkval] = obj
-        for key, vals in iteritems(indexes_update): cache_indexes[key][vals] = obj
+        for key, vals in indexes_update.items(): cache_indexes[key][vals] = obj
         objects_to_save = cache.objects_to_save
         obj._save_pos_ = len(objects_to_save)
         objects_to_save.append(obj)
@@ -4746,7 +4757,7 @@ class Entity(with_metaclass(EntityMeta)):
             else: return pkval._get_raw_pkval_()
         raw_pkval = []
         append, extend = raw_pkval.append, raw_pkval.extend
-        for attr, val in izip(obj._pk_attrs_, pkval):
+        for attr, val in zip(obj._pk_attrs_, pkval):
             if not attr.reverse: append(val)
             else: extend(val._get_raw_pkval_())
         return tuple(raw_pkval)
@@ -4779,7 +4790,7 @@ class Entity(with_metaclass(EntityMeta)):
     def __repr__(obj):
         pkval = obj._pkval_
         if pkval is None: return '%s[new:%d]' % (obj.__class__.__name__, obj._newid_)
-        if obj._pk_is_composite_: pkval = ','.join(imap(repr, pkval))
+        if obj._pk_is_composite_: pkval = ','.join(map(repr, pkval))
         else: pkval = repr(pkval)
         return '%s[%s]' % (obj.__class__.__name__, pkval)
     @classmethod
@@ -4790,7 +4801,7 @@ class Entity(with_metaclass(EntityMeta)):
         if cache is None or not cache.is_alive:
             throw(DatabaseSessionIsOver, 'Cannot load objects from the database: the database session is over')
         max_batch_size = database.provider.max_params_count // len(entity._pk_columns_)
-        for i in xrange(0, len(objects), max_batch_size):
+        for i in range(0, len(objects), max_batch_size):
             batch = objects[i:i+max_batch_size]
             sql, adapter, attr_offsets = entity._construct_batchload_sql_(len(batch))
             arguments = adapter(batch)
@@ -4825,13 +4836,13 @@ class Entity(with_metaclass(EntityMeta)):
             throw(TransactionError, "Object %s doesn't belong to current transaction" % safe_repr(obj))
         if obj._status_ in created_or_deleted_statuses: return
         if not attrs:
-            attrs = tuple(attr for attr, bit in iteritems(entity._bits_)
+            attrs = tuple(attr for attr, bit in entity._bits_.items()
                           if bit and attr not in obj._vals_)
         else:
             args = attrs
             attrs = set()
             for arg in args:
-                if isinstance(arg, basestring):
+                if isinstance(arg, str):
                     attr = entity._adict_.get(arg)
                     if attr is None:
                         if not is_ident(arg): throw(ValueError, 'Invalid attribute name: %r' % arg)
@@ -4862,7 +4873,7 @@ class Entity(with_metaclass(EntityMeta)):
                     select_list.append([ 'COLUMN', None, column ])
             from_list = [ 'FROM', [ None, 'TABLE', entity._table_ ]]
             criteria_list = [ [ converter.EQ, [ 'COLUMN', None, column ], [ 'PARAM', (i, None, None), converter ] ]
-                              for i, (column, converter) in enumerate(izip(obj._pk_columns_, obj._pk_converters_)) ]
+                              for i, (column, converter) in enumerate(zip(obj._pk_columns_, obj._pk_converters_)) ]
             where_list = [ 'WHERE' ] + criteria_list
 
             sql_ast = [ 'SELECT', select_list, from_list, where_list ]
@@ -4904,7 +4915,7 @@ class Entity(with_metaclass(EntityMeta)):
         get_dbval = obj._dbvals_.get
         rbits = obj._rbits_
         wbits = obj._wbits_
-        for attr, new_dbval in items_list(avdict):
+        for attr, new_dbval in list(avdict.items()):
             assert attr.pk_offset is None
             assert new_dbval is not NOT_LOADED
             old_dbval = get_dbval(attr, NOT_LOADED)
@@ -4917,13 +4928,13 @@ class Entity(with_metaclass(EntityMeta)):
         if unpickling:
             new_vals = avdict
             new_dbvals = {attr: attr.converters[0].val2dbval(val, obj) if not attr.reverse else val
-                                for attr, val in iteritems(avdict)}
+                                for attr, val in avdict.items()}
         else:
             new_dbvals = avdict
             new_vals = {attr: attr.converters[0].dbval2val(dbval, obj) if not attr.reverse else dbval
-                              for attr, dbval in iteritems(avdict)}
+                              for attr, dbval in avdict.items()}
 
-        for attr, new_val in items_list(new_vals):
+        for attr, new_val in list(new_vals.items()):
             new_dbval = new_dbvals[attr]
             old_dbval = get_dbval(attr, NOT_LOADED)
             bit = obj._bits_except_volatile_[attr]
@@ -4940,7 +4951,7 @@ class Entity(with_metaclass(EntityMeta)):
             if wbits & bit:
                 del new_vals[attr]
 
-        for attr, new_val in iteritems(new_vals):
+        for attr, new_val in new_vals.items():
             if attr.is_unique:
                 old_val = get_val(attr)
                 if old_val != new_val:
@@ -5075,9 +5086,12 @@ class Entity(with_metaclass(EntityMeta)):
             get_val = obj._vals_.get
             objects_to_save = cache.objects_to_save
             if avdict:
+                if any(attr not in obj._vals_ and attr.reverse and obj._bits_[attr] for attr in avdict):
+                    obj._load_()
+
                 for attr in avdict:
-                    if attr not in obj._vals_ and attr.reverse and not attr.reverse.is_collection:
-                        attr.load(obj)  # loading of one-to-one relations
+                    if attr not in obj._vals_ and attr.reverse:
+                        attr.load(obj)  # load one-to-one and lazy relations
 
                 if wbits is not None:
                     new_wbits = wbits
@@ -5096,8 +5110,8 @@ class Entity(with_metaclass(EntityMeta)):
                         obj._vals_.update(avdict)
                         return
 
-                for attr, value in items_list(avdict):
-                    if value == get_val(attr):
+                for attr, new_val in list(avdict.items()):
+                    if new_val == get_val(attr, NOT_LOADED):
                         avdict.pop(attr)
 
             undo_funcs = []
@@ -5127,11 +5141,11 @@ class Entity(with_metaclass(EntityMeta)):
                             if attr in avdict: vals[i] = avdict[attr]
                         new_vals = tuple(vals)
                         cache.update_composite_index(obj, attrs, prev_vals, new_vals, undo)
-                for attr, new_val in iteritems(avdict):
+                for attr, new_val in avdict.items():
                     if not attr.reverse: continue
-                    old_val = get_val(attr)
+                    old_val = get_val(attr, NOT_LOADED)
                     attr.update_reverse(obj, old_val, new_val, undo_funcs)
-                for attr, new_val in iteritems(collection_avdict):
+                for attr, new_val in collection_avdict.items():
                     attr.__set__(obj, new_val, undo_funcs)
             except:
                 for undo_func in undo_funcs: undo_func()
@@ -5322,7 +5336,7 @@ class Entity(with_metaclass(EntityMeta)):
                 params_count = populate_criteria_list(where_list, pk_columns, pk_converters, repeat('EQ'), params_count)
                 if optimistic_columns: populate_criteria_list(
                     where_list, optimistic_columns, optimistic_converters, optimistic_ops, params_count, optimistic=True)
-                sql_ast = [ 'UPDATE', obj._table_, list(izip(update_columns, update_params)), where_list ]
+                sql_ast = [ 'UPDATE', obj._table_, list(zip(update_columns, update_params)), where_list ]
                 sql, adapter = database._ast2sql(sql_ast)
                 obj._update_sql_cache_[query_key] = sql, adapter
             else: sql, adapter = cached_sql
@@ -5338,20 +5352,12 @@ class Entity(with_metaclass(EntityMeta)):
         values = []
         values.extend(obj._get_raw_pkval_())
         cache = obj._session_cache_
-        optimistic_session = cache.db_session is None or cache.db_session.optimistic
-        if optimistic_session and obj not in cache.for_update:
-            optimistic_ops, optimistic_columns, optimistic_converters, optimistic_values = \
-                obj._construct_optimistic_criteria_()
-            values.extend(optimistic_values)
-        else: optimistic_columns = optimistic_converters = optimistic_ops = ()
-        query_key = tuple(optimistic_columns), tuple(optimistic_ops)
+        query_key = ()
         database = obj._database_
         cached_sql = obj._delete_sql_cache_.get(query_key)
         if cached_sql is None:
             where_list = [ 'WHERE' ]
             params_count = populate_criteria_list(where_list, obj._pk_columns_, obj._pk_converters_, repeat('EQ'))
-            if optimistic_columns: populate_criteria_list(
-                where_list, optimistic_columns, optimistic_converters, optimistic_ops, params_count, optimistic=True)
             from_ast = [ 'FROM', [ None, 'TABLE', obj._table_ ] ]
             sql_ast = [ 'DELETE', None, from_ast, where_list ]
             sql, adapter = database._ast2sql(sql_ast)
@@ -5359,8 +5365,6 @@ class Entity(with_metaclass(EntityMeta)):
         else: sql, adapter = cached_sql
         arguments = adapter(values)
         cursor = database._exec_sql(sql, arguments, start_transaction=True)
-        if cursor.rowcount == 0 and cache.db_session.optimistic:
-            throw(OptimisticCheckError, obj.find_updated_attributes())
         obj._status_ = 'deleted'
         cache.indexes[obj._pk_attrs_].pop(obj._pkval_)
 
@@ -5390,7 +5394,7 @@ class Entity(with_metaclass(EntityMeta)):
         pk_columns = entity._pk_columns_
         pk_converters = entity._pk_converters_
         criteria_list = [ [ converter.EQ, [ 'COLUMN', None, column ], [ 'PARAM', (i, None, None), converter ] ]
-                          for i, (column, converter) in enumerate(izip(pk_columns, pk_converters)) ]
+                          for i, (column, converter) in enumerate(zip(pk_columns, pk_converters)) ]
         sql_ast = [ 'SELECT', select_list, from_list, [ 'WHERE' ] + criteria_list ]
         database = entity._database_
         sql, adapter = database._ast2sql(sql_ast)
@@ -5490,19 +5494,12 @@ class Entity(with_metaclass(EntityMeta)):
 def string2ast(s):
     result = string2ast_cache.get(s)
     if result is not None: return result
-    if PY2:
-        if isinstance(s, str):
-            try: s.encode('ascii')
-            except UnicodeDecodeError: throw(TypeError,
-                'The bytestring %r contains non-ascii symbols. Try to pass unicode string instead' % s)
-        else: s = s.encode('ascii', 'backslashreplace')
-    module_node = parse('(%s)' % s)
+    module_node = ast.parse('(%s)' % s)
     if not isinstance(module_node, ast.Module): throw(TypeError)
-    stmt_node = module_node.node
-    if not isinstance(stmt_node, ast.Stmt) or len(stmt_node.nodes) != 1: throw(TypeError)
-    discard_node = stmt_node.nodes[0]
-    if not isinstance(discard_node, ast.Discard): throw(TypeError)
-    result = string2ast_cache[s] = discard_node.expr
+    assert len(module_node.body) == 1
+    expr = module_node.body[0]
+    assert isinstance(expr, ast.Expr)
+    result = string2ast_cache[s] = expr.value
     # result = deepcopy(result)  # no need for now, but may be needed later
     return result
 
@@ -5511,10 +5508,10 @@ def get_globals_and_locals(args, kwargs, frame_depth, from_generator=False):
     assert args_len > 0
     func = args[0]
     if from_generator:
-        if not isinstance(func, (basestring, types.GeneratorType)): throw(TypeError,
+        if not isinstance(func, (str, types.GeneratorType)): throw(TypeError,
             'The first positional argument must be generator expression or its text source. Got: %r' % func)
     else:
-        if not isinstance(func, (basestring, types.FunctionType)): throw(TypeError,
+        if not isinstance(func, (str, types.FunctionType)): throw(TypeError,
             'The first positional argument must be lambda function or its text source. Got: %r' % func)
     if args_len > 1:
         globals = args[1]
@@ -5529,7 +5526,7 @@ def get_globals_and_locals(args, kwargs, frame_depth, from_generator=False):
             locals = locals.copy()
             locals.update(func.gi_frame.f_locals)
         if len(args) > 3: throw(TypeError, 'Excess positional argument%s: %s'
-                                % (len(args) > 4 and 's' or '', ', '.join(imap(repr, args[3:]))))
+                                % (len(args) > 4 and 's' or '', ', '.join(map(repr, args[3:]))))
     else:
         locals = {}
         if frame_depth is not None:
@@ -5548,14 +5545,15 @@ def make_query(args, frame_depth, left_join=False):
     if isinstance(gen, types.GeneratorType):
         tree, external_names, cells = decompile(gen)
         code_key = id(gen.gi_frame.f_code)
-    elif isinstance(gen, basestring):
+    elif isinstance(gen, str):
         tree = string2ast(gen)
-        if not isinstance(tree, ast.GenExpr): throw(TypeError,
-            'Source code should represent generator. Got: %s' % gen)
+        if not isinstance(tree, ast.GeneratorExp):
+            throw(TypeError, 'Source code should represent generator. Got: %s' % gen)
         code_key = gen
         cells = None
-    else: assert False
-    return Query(code_key, tree.code, globals, locals, cells, left_join)
+    else:
+        assert False
+    return Query(code_key, tree, globals, locals, cells, left_join)
 
 @cut_traceback
 def select(*args):
@@ -5585,7 +5583,7 @@ def make_aggrfunc(std_func):
         if type(arg) is types.GeneratorType:
             try: iterator = arg.gi_frame.f_locals['.0']
             except: return std_func(*args, **kwargs)
-            if isinstance(iterator, EntityIter):
+            if isinstance(iterator, (EntityIter, QueryResultIterator)):
                 return getattr(select(arg), std_func.__name__)(*args[1:], **kwargs)
         return std_func(*args, **kwargs)
     aggrfunc.__name__ = std_func.__name__
@@ -5610,7 +5608,7 @@ def desc(expr):
         return expr.attr
     if isinstance(expr, int_types):
         return -expr
-    if isinstance(expr, basestring):
+    if isinstance(expr, str):
         return 'desc(%s)' % expr
     return expr
 
@@ -5624,10 +5622,12 @@ def extract_vars(code_key, filter_num, extractors, globals, locals, cells=None):
                 throw(NameError, 'Free variable `%s` referenced before assignment in enclosing scope' % name)
     vars = {}
     vartypes = HashableDict()
-    for src, extractor in iteritems(extractors):
+    for src, extractor in extractors.items():
         varkey = filter_num, src, code_key
-        try: value = extractor(globals, locals)
-        except Exception as cause: raise ExprEvalError(src, cause)
+        try:
+            value = extractor(globals, locals)
+        except Exception as cause:
+            raise ExprEvalError(src, cause)
 
         if isinstance(value, types.GeneratorType):
             value = make_query((value,), frame_depth=None)
@@ -5668,12 +5668,12 @@ def unpickle_query(query_result):
 
 class Query(object):
     def __init__(query, code_key, tree, globals, locals, cells=None, left_join=False):
-        assert isinstance(tree, ast.GenExprInner)
+        assert isinstance(tree, ast.GeneratorExp)
         tree, extractors = create_extractors(code_key, tree, globals, locals, special_functions, const_functions)
         filter_num = 0
         vars, vartypes = extract_vars(code_key, filter_num, extractors, globals, locals, cells)
 
-        node = tree.quals[0].iter
+        node = tree.generators[0].iter
         varkey = filter_num, node.src, code_key
         origin = vars[varkey]
         if isinstance(origin, Query):
@@ -5758,8 +5758,8 @@ class Query(object):
         all_func_vartypes = {}
         if translator is not None:
             if translator.func_extractors_map:
-                for func, func_extractors in iteritems(translator.func_extractors_map):
-                    func_id = id(func.func_code if PY2 else func.__code__)
+                for func, func_extractors in translator.func_extractors_map.items():
+                    func_id = id(func.__code__)
                     func_filter_num = translator.filter_num, 'func', func_id
                     func_vars, func_vartypes = extract_vars(
                         func_id, func_filter_num, func_extractors, func.__globals__, {}, func.__closure__)  # todo closures
@@ -5768,7 +5768,7 @@ class Query(object):
                     all_func_vartypes.update(func_vartypes)
                 if all_func_vartypes != translator.func_vartypes:
                     return None, vars.copy()
-            for key, val in iteritems(translator.fixed_param_values):
+            for key, val in translator.fixed_param_values.items():
                 assert key in new_vars
                 if val != new_vars[key]:
                     del database._translator_cache[query_key]
@@ -5939,7 +5939,7 @@ class Query(object):
         translator = query._translator
         if translator.order: pass
         elif type(translator.expr_type) is tuple:
-            query = query.order_by(*[i+1 for i in xrange(len(query._translator.expr_type))])
+            query = query.order_by(*[i+1 for i in range(len(query._translator.expr_type))])
         else:
             query = query.order_by(1)
         objects = query.without_distinct()[:1]
@@ -5958,9 +5958,9 @@ class Query(object):
     @cut_traceback
     def delete(query, bulk=None):
         if not bulk:
-            if not isinstance(query._translator.expr_type, EntityMeta): throw(TypeError,
-                'Delete query should be applied to a single entity. Got: %s'
-                % ast2src(query._translator.tree.expr))
+            if not isinstance(query._translator.expr_type, EntityMeta):
+                throw(TypeError, 'Delete query should be applied to a single entity. Got: %s'
+                                 % ast2src(query._translator.tree.elt))
             objects = query._actual_fetch()
             for obj in objects: obj._delete_()
             return len(objects)
@@ -6006,7 +6006,7 @@ class Query(object):
                 query._database._translator_cache[new_key] = new_translator
             return query._clone(_key=new_key, _filters=new_filters, _translator=new_translator)
 
-        if isinstance(args[0], (basestring, types.FunctionType)):
+        if isinstance(args[0], (str, types.FunctionType)):
             func, globals, locals = get_globals_and_locals(args, kwargs=None, frame_depth=cut_traceback_depth+2)
             return query._process_lambda(func, globals, locals, order_by=True)
 
@@ -6035,16 +6035,16 @@ class Query(object):
     def _process_lambda(query, func, globals, locals, order_by=False, original_names=False):
         prev_translator = query._translator
         argnames = ()
-        if isinstance(func, basestring):
+        if isinstance(func, str):
             func_id = func
             func_ast = string2ast(func)
             if isinstance(func_ast, ast.Lambda):
                 argnames = get_lambda_args(func_ast)
-                func_ast = func_ast.code
+                func_ast = func_ast.body
             cells = None
         elif type(func) is types.FunctionType:
             argnames = get_lambda_args(func)
-            func_id = id(func.func_code if PY2 else func.__code__)
+            func_id = id(func.__code__)
             func_ast, external_names, cells = decompile(func)
         elif not order_by: throw(TypeError,
             'Argument of filter() method must be a lambda functon or its text. Got: %r' % func)
@@ -6128,14 +6128,17 @@ class Query(object):
             return query._process_lambda(func, globals, locals, order_by=False, original_names=True)
         if not kwargs: return query
 
-        if len(query._translator.tree.quals) > 1: throw(TypeError,
+        if len(query._translator.tree.generators) > 1: throw(TypeError,
             'Keyword arguments are not allowed: query iterates over more than one entity')
         return query._apply_kwargs(kwargs, original_names=True)
     def _apply_kwargs(query, kwargs, original_names=False):
         translator = query._translator
         if original_names:
             tablerefs = translator.sqlquery.tablerefs
-            alias = translator.tree.quals[0].assign.name
+            target = translator.tree.generators[0].target
+            if not isinstance(target, ast.Name):
+                throw(NotImplementedError, target)
+            alias = target.id
             tableref = tablerefs[alias]
             entity = tableref.entity
         else:
@@ -6144,7 +6147,7 @@ class Query(object):
         filterattrs = []
         value_dict = {}
         next_id = query._next_kwarg_id
-        for attrname, val in sorted(iteritems(kwargs)):
+        for attrname, val in sorted(kwargs.items()):
             attr = get_attr(attrname)
             if attr is None: throw(AttributeError,
                 'Entity %s does not have attribute %s' % (entity.__name__, attrname))
@@ -6217,7 +6220,7 @@ class Query(object):
                 if aggr_func_name == 'AVG':
                     expr_type = float
                 elif aggr_func_name == 'GROUP_CONCAT':
-                    expr_type = basestring
+                    expr_type = str
                 else:
                     expr_type = translator.expr_type
                 provider = query._database.provider
@@ -6234,7 +6237,7 @@ class Query(object):
     @cut_traceback
     def group_concat(query, sep=None, distinct=None):
         if sep is not None:
-            if not isinstance(sep, basestring):
+            if not isinstance(sep, str):
                 throw(TypeError, '`sep` option for `group_concat` should be of type str. Got: %s' % type(sep).__name__)
         return query._aggregate('GROUP_CONCAT', distinct, sep)
     @cut_traceback
@@ -6418,7 +6421,7 @@ class QueryResult(object):
                 width_dict[col_num] = base_len
 
         writeln(strjoin('|', (strcut(colname, width_dict[i]) for i, colname in enumerate(col_names))))
-        writeln(strjoin('+', ('-' * width_dict[i] for i in xrange(len(col_names)))))
+        writeln(strjoin('+', ('-' * width_dict[i] for i in range(len(col_names)))))
         for row in rows:
             writeln(strjoin('|', (strcut(item, width_dict[i]) for i, item in enumerate(row))))
         stream.flush()
@@ -6473,7 +6476,7 @@ def show(entity):
         #     print('  %s: %s' % (attr.name, strcut(value, width-len(attr.name)-4)))
         # print()
         QueryResult([ x ], None, x.__class__, None).show()
-    elif isinstance(x, (basestring, types.GeneratorType)):
+    elif isinstance(x, (str, types.GeneratorType)):
         select(x).show()
     elif hasattr(x, 'show'):
         x.show()

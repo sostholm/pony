@@ -1,5 +1,5 @@
 from __future__ import absolute_import
-from pony.py23compat import PY2, basestring, unicode, buffer, int_types
+from pony.py23compat import buffer, int_types
 
 from decimal import Decimal
 from datetime import datetime, date, time, timedelta
@@ -45,13 +45,11 @@ class PGTranslator(SQLTranslator):
 
 class PGValue(Value):
     __slots__ = []
-    def __unicode__(self):
+    def __str__(self):
         value = self.value
         if isinstance(value, bool):
             return value and 'true' or 'false'
-        return Value.__unicode__(self)
-    if not PY2:
-        __str__ = __unicode__
+        return Value.__str__(self)
 
 class PGSQLBuilder(SQLBuilder):
     dialect = 'PostgreSQL'
@@ -88,7 +86,7 @@ class PGSQLBuilder(SQLBuilder):
         for value in values:
             if isinstance(value, int):
                 result.append(str(value))
-            elif isinstance(value, basestring):
+            elif isinstance(value, str):
                 result.append(value if is_ident(value) else '"%s"' % value.replace('"', '\\"'))
             else: assert False, value
         return '{%s}' % ','.join(result)
@@ -138,14 +136,6 @@ class PGSQLBuilder(SQLBuilder):
         return 'ARRAY[', join(', ', (builder(item) for item in items)), ']'
 
 
-class PGStrConverter(dbapiprovider.StrConverter):
-    if PY2:
-        def py2sql(converter, val):
-            return val.encode('utf-8')
-        def sql2py(converter, val):
-            if isinstance(val, unicode): return val
-            return val.decode('utf-8')
-
 class PGIntConverter(dbapiprovider.IntConverter):
     signed_types = {None: 'INTEGER', 8: 'SMALLINT', 16: 'SMALLINT', 24: 'INTEGER', 32: 'INTEGER', 64: 'BIGINT'}
     unsigned_types = {None: 'INTEGER', 8: 'SMALLINT', 16: 'INTEGER', 24: 'INTEGER', 32: 'BIGINT'}
@@ -175,7 +165,7 @@ class PGJsonConverter(dbapiprovider.JsonConverter):
 class PGArrayConverter(dbapiprovider.ArrayConverter):
     array_types = {
         int: ('int', PGIntConverter),
-        unicode: ('text', PGStrConverter),
+        str: ('text', dbapiprovider.StrConverter),
         float: ('double precision', PGRealConverter)
     }
 
@@ -195,6 +185,10 @@ class PGPool(Pool):
         except:
             pool.drop(con)
             raise
+
+
+ADMIN_SHUTDOWN = '57P01'
+
 
 class PGProvider(DBAPIProvider):
     dialect = 'PostgreSQL'
@@ -222,7 +216,8 @@ class PGProvider(DBAPIProvider):
         provider.table_if_not_exists_syntax = provider.server_version >= 90100
 
     def should_reconnect(provider, exc):
-        return isinstance(exc, psycopg2.OperationalError) and exc.pgcode is None
+        return isinstance(exc, psycopg2.OperationalError) \
+               and exc.pgcode in (None, ADMIN_SHUTDOWN)
 
     def get_pool(provider, *args, **kwargs):
         return PGPool(provider.dbapi_module, *args, **kwargs)
@@ -247,7 +242,6 @@ class PGProvider(DBAPIProvider):
 
     @wrap_dbapi_exceptions
     def execute(provider, cursor, sql, arguments=None, returning_id=False):
-        if PY2 and isinstance(sql, unicode): sql = sql.encode('utf8')
         if type(arguments) is list:
             assert arguments and not returning_id
             cursor.executemany(sql, arguments)
@@ -303,7 +297,7 @@ class PGProvider(DBAPIProvider):
     converter_classes = [
         (NoneType, dbapiprovider.NoneConverter),
         (bool, dbapiprovider.BoolConverter),
-        (basestring, PGStrConverter),
+        (str, dbapiprovider.StrConverter),
         (int_types, PGIntConverter),
         (float, PGRealConverter),
         (Decimal, dbapiprovider.DecimalConverter),

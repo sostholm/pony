@@ -1,7 +1,6 @@
 from __future__ import absolute_import, print_function
-from pony.py23compat import PY2, imap, basestring, unicode, pickle, iteritems
 
-import io, re, os.path, sys, inspect, types, warnings
+import ast, io, re, os.path, sys, inspect, types, warnings, pickle
 
 from datetime import datetime
 from itertools import count as _count
@@ -15,7 +14,6 @@ from copy import deepcopy
 import pony
 from pony import options
 
-from pony.thirdparty.compiler import ast
 from pony.thirdparty.decorator import decorator as _decorator
 
 if pony.MODE.startswith('GAE-'): localbase = object
@@ -86,14 +84,9 @@ if pony.MODE != 'INTERACTIVE':
     def cut_traceback(func):
         return func
 
-if PY2:
-    exec('''def reraise(exc_type, exc, tb):
-    try: raise exc_type, exc, tb
-    finally: del tb''')
-else:
-    def reraise(exc_type, exc, tb):
-        try: raise exc.with_traceback(tb)
-        finally: del exc, tb
+def reraise(exc_type, exc, tb):
+    try: raise exc.with_traceback(tb)
+    finally: del exc, tb
 
 def throw(exc_type, *args, **kwargs):
     if isinstance(exc_type, Exception):
@@ -124,7 +117,7 @@ lambda_args_cache = {}
 
 def get_lambda_args(func):
     if type(func) is types.FunctionType:
-        codeobject = func.func_code if PY2 else func.__code__
+        codeobject = func.__code__
         cache_key = get_codeobject_id(codeobject)
     elif isinstance(func, ast.Lambda):
         cache_key = func
@@ -154,12 +147,10 @@ def get_lambda_args(func):
         else:
             names, argsname, kwname, defaults = inspect.getargspec(func)
     elif isinstance(func, ast.Lambda):
-        names = func.argnames
-        if func.kwargs: names, kwname = names[:-1], names[-1]
-        else: kwname = None
-        if func.varargs: names, argsname = names[:-1], names[-1]
-        else: argsname = None
-        defaults = func.defaults
+        argsname = func.args.vararg
+        kwname = func.args.kwarg
+        defaults = func.args.defaults + func.args.kw_defaults
+        names = [arg.arg for arg in func.args.args]
     else: assert False  # pragma: no cover
     if argsname: throw(TypeError, '*%s is not supported' % argsname)
     if kwname: throw(TypeError, '**%s is not supported' % kwname)
@@ -308,9 +299,9 @@ def parse_expr(s, pos=0):
         else: assert False  # pragma: no cover
 
 def tostring(x):
-    if isinstance(x, basestring): return x
+    if isinstance(x, str): return x
     if hasattr(x, '__unicode__'):
-        try: return unicode(x)
+        try: return str(x)
         except: pass
     if hasattr(x, 'makeelement'): return cElementTree.tostring(x)
     try: return str(x)
@@ -321,7 +312,7 @@ def tostring(x):
     return '<%s object at 0x%X>' % (x.__class__.__name__)
 
 def strjoin(sep, strings, source_encoding='ascii', dest_encoding=None):
-    "Can join mix of unicode and byte strings in different encodings"
+    "Can join mix of str and byte strings in different encodings"
     strings = list(strings)
     try: return sep.join(strings)
     except UnicodeDecodeError: pass
@@ -424,7 +415,7 @@ class HashableDict(dict):
         if getattr(self, '_hash', None) is not None:
             return self
         return HashableDict({deepcopy(key, memo): deepcopy(value, memo)
-                            for key, value in iteritems(self)})
+                            for key, value in self.items()})
     __setitem__ = _hashable_wrap(dict.__setitem__)
     __delitem__ = _hashable_wrap(dict.__delitem__)
     clear = _hashable_wrap(dict.clear)

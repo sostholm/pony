@@ -14,7 +14,7 @@ class TestObjectToDict(unittest.TestCase):
         db = cls.db = Database()
 
         class Student(db.Entity):
-            name = Required(unicode)
+            name = Required(str)
             scholarship = Optional(int)
             gpa = Optional(Decimal, 3, 1)
             dob = Optional(date)
@@ -27,7 +27,7 @@ class TestObjectToDict(unittest.TestCase):
             students = Set(Student)
 
         class Course(db.Entity):
-            name = Required(unicode, unique=True)
+            name = Required(str, unique=True)
             students = Set(Student)
 
         setup_database(db)
@@ -110,7 +110,7 @@ class TestObjectToDict(unittest.TestCase):
         d = s1.to_dict('id name group')
         self.assertEqual(d, dict(id=1, name='S1', group=1))
 
-    @raises_exception(AttributeError, 'Entity Student does not have attriute x')
+    @raises_exception(AttributeError, 'Entity Student does not have attribute x')
     def test11(self):
         s1 = self.db.Student[1]
         d = s1.to_dict('id name x group')
@@ -136,7 +136,7 @@ class TestObjectToDict(unittest.TestCase):
         d = s1.to_dict(exclude='dob gpa scholarship')
         self.assertEqual(d, dict(id=1, name='S1', group=1))
 
-    @raises_exception(AttributeError, 'Entity Student does not have attriute x')
+    @raises_exception(AttributeError, 'Entity Student does not have attribute x')
     def test16(self):
         s1 = self.db.Student[1]
         d = s1.to_dict(exclude='dob gpa x scholarship')
@@ -189,7 +189,7 @@ class TestSerializationToDict(unittest.TestCase):
         db = cls.db = Database()
 
         class Student(db.Entity):
-            name = Required(unicode)
+            name = Required(str)
             scholarship = Optional(int)
             gpa = Optional(Decimal, 3, 1)
             dob = Optional(date)
@@ -202,7 +202,7 @@ class TestSerializationToDict(unittest.TestCase):
             students = Set(Student)
 
         class Course(db.Entity):
-            name = Required(unicode, unique=True)
+            name = Required(str, unique=True)
             students = Set(Student)
 
         setup_database(db)

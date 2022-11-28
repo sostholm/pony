@@ -1,6 +1,5 @@
-from pony.py23compat import StringIO
-
-import sys, unittest
+import io, sys, unittest
+import contextlib
 from decimal import Decimal
 from datetime import date
 
@@ -12,7 +11,7 @@ db = Database()
 
 
 class Student(db.Entity):
-    name = Required(unicode)
+    name = Required(str)
     scholarship = Optional(int)
     gpa = Optional(Decimal, 3, 1)
     dob = Optional(date)
@@ -25,7 +24,7 @@ class Group(db.Entity):
     students = Set(Student)
 
 class Course(db.Entity):
-    name = Required(unicode, unique=True)
+    name = Required(str, unique=True)
     students = Set(Student)
 
 
@@ -54,16 +53,16 @@ class TestShow(unittest.TestCase):
     def setUp(self):
         rollback()
         db_session.__enter__()
-        sys.stdout = StringIO()
 
     def tearDown(self):
-        sys.stdout = normal_stdout
         rollback()
         db_session.__exit__()
 
     def test_1(self):
-        Student.select().show()
-        self.assertEqual('\n'+sys.stdout.getvalue().replace(' ', '~'), '''
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
+            Student.select().show()
+        self.assertEqual('\n' + f.getvalue().replace(' ', '~'), '''
 id|name|scholarship|gpa|dob~~~~~~~|group~~~
 --+----+-----------+---+----------+--------
 1~|S1~~|None~~~~~~~|3.1|None~~~~~~|Group[1]
@@ -72,8 +71,10 @@ id|name|scholarship|gpa|dob~~~~~~~|group~~~
 ''')
 
     def test_2(self):
-        Group.select().show()
-        self.assertEqual('\n'+sys.stdout.getvalue().replace(' ', '~'), '''
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
+            Group.select().show()
+        self.assertEqual('\n' + f.getvalue().replace(' ', '~'), '''
 number
 ------
 1~~~~~

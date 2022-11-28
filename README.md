@@ -1,32 +1,6 @@
 # Downloads
 [![Downloads](https://pepy.tech/badge/pony)](https://pepy.tech/project/pony) [![Downloads](https://pepy.tech/badge/pony/month)](https://pepy.tech/project/pony/month) [![Downloads](https://pepy.tech/badge/pony/week)](https://pepy.tech/project/pony/week)
 
-# Tests
-
-#### PostgreSQL
-Python 2 <a href="http://jenkins.agilecode.io:8111/viewType.html?buildTypeId=GithubPonyORMCi_Python2postgres&guest=1">
-<img src="http://jenkins.agilecode.io:8111/app/rest/builds/buildType:(id:GithubPonyORMCi_Python2postgres)/statusIcon"/>
-</a>
-Python 3 <a href="http://jenkins.agilecode.io:8111/viewType.html?buildTypeId=GithubPonyORMCi_Python3postgres&guest=1">
-<img src="http://jenkins.agilecode.io:8111/app/rest/builds/buildType:(id:GithubPonyORMCi_Python3postgres)/statusIcon"/>
-</a>
-
-#### SQLite
-Python 2 <a href="http://jenkins.agilecode.io:8111/viewType.html?buildTypeId=GithubPonyORMCi_Python2sqlite&guest=1">
-<img src="http://jenkins.agilecode.io:8111/app/rest/builds/buildType:(id:GithubPonyORMCi_Python2sqlite)/statusIcon"/>
-</a>
-Python 3 <a href="http://jenkins.agilecode.io:8111/viewType.html?buildTypeId=GithubPonyORMCi_Python3sqlite&guest=1">
-<img src="http://jenkins.agilecode.io:8111/app/rest/builds/buildType:(id:GithubPonyORMCi_Python3sqlite)/statusIcon"/>
-</a>
-
-#### CockroachDB
-Python 2 <a href="http://jenkins.agilecode.io:8111/viewType.html?buildTypeId=GithubPonyORMCi_Python2cockroach&guest=1">
-<img src="http://jenkins.agilecode.io:8111/app/rest/builds/buildType:(id:GithubPonyORMCi_Python2cockroach)/statusIcon"/>
-</a>
-Python 3 <a href="http://jenkins.agilecode.io:8111/viewType.html?buildTypeId=GithubPonyORMCi_Python3cockroach&guest=1">
-<img src="http://jenkins.agilecode.io:8111/app/rest/builds/buildType:(id:GithubPonyORMCi_Python3cockroach)/statusIcon"/>
-</a>
-
 
 Pony Object-Relational Mapper
 =============================
@@ -35,7 +9,9 @@ Pony is an advanced object-relational mapper. The most interesting feature of Po
 
 Here is an example query in Pony:
 
-    select(p for p in Product if p.name.startswith('A') and p.cost <= 1000)
+```python
+select(p for p in Product if p.name.startswith('A') and p.cost <= 1000)
+```
 
 Pony translates queries to SQL using a specific database dialect. Currently Pony works with SQLite, MySQL, PostgreSQL and Oracle databases.
 
@@ -88,4 +64,4 @@ Meet the PonyORM team, chat with the community members, and get your questions a
 Join our newsletter at [ponyorm.org](https://ponyorm.org).
 Reach us on [Twitter](https://twitter.com/ponyorm).
 
-Copyright (c) 2013-2019 Pony ORM. All rights reserved. info (at) ponyorm.org
+Copyright (c) 2013-2022 Pony ORM. All rights reserved. info (at) ponyorm.org

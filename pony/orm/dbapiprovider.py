@@ -1,5 +1,5 @@
 from __future__ import absolute_import, print_function, division
-from pony.py23compat import PY2, basestring, unicode, buffer, int_types, iteritems
+from pony.py23compat import buffer, int_types
 
 import os, re, json
 from decimal import Decimal, InvalidOperation
@@ -122,7 +122,8 @@ class DBAPIProvider(object):
 
     fk_types = { 'SERIAL' : 'INTEGER', 'BIGSERIAL' : 'BIGINT' }
 
-    def __init__(provider, *args, **kwargs):
+    def __init__(provider, _database, *args, **kwargs):
+        provider.database = _database
         pool_mockup = kwargs.pop('pony_pool_mockup', None)
         call_on_connect = kwargs.pop('pony_call_on_connect', None)
         if pool_mockup: provider.pool = pool_mockup
@@ -185,7 +186,7 @@ class DBAPIProvider(object):
         return provider.normalize_name(fk_name.lower())
 
     def split_table_name(provider, table_name):
-        if isinstance(table_name, basestring): return provider.default_schema_name, table_name
+        if isinstance(table_name, str): return provider.default_schema_name, table_name
         if not table_name: throw(TypeError, 'Invalid table name: %r' % table_name)
         if len(table_name) != 2:
             size = len(table_name)
@@ -196,15 +197,15 @@ class DBAPIProvider(object):
         return table_name[0], table_name[1]
 
     def base_name(provider, name):
-        if not isinstance(name, basestring):
+        if not isinstance(name, str):
             assert type(name) is tuple
             name = name[-1]
-            assert isinstance(name, basestring)
+            assert isinstance(name, str)
         return name
 
     def quote_name(provider, name):
         quote_char = provider.quote_char
-        if isinstance(name, basestring):
+        if isinstance(name, str):
             name = name.replace(quote_char, quote_char+quote_char)
             return quote_char + name + quote_char
         return '.'.join(provider.quote_name(item) for item in name)
@@ -213,7 +214,7 @@ class DBAPIProvider(object):
         return provider.quote_name(name)
 
     def normalize_vars(provider, vars, vartypes):
-        for key, value in iteritems(vars):
+        for key, value in vars.items():
             vartype = vartypes[key]
             if isinstance(vartype, QueryType):
                 vartypes[key], vars[key] = value._normalize_var(vartype)
@@ -459,9 +460,8 @@ class StrConverter(Converter):
         converter.db_encoding = kwargs.pop('db_encoding', None)
         converter.autostrip = kwargs.pop('autostrip', True)
     def validate(converter, val, obj=None):
-        if PY2 and isinstance(val, str): val = val.decode('ascii')
-        elif not isinstance(val, unicode): throw(TypeError,
-            'Value type for attribute %s must be %s. Got: %r' % (converter.attr, unicode.__name__, type(val)))
+        if not isinstance(val, str): throw(TypeError,
+            'Value type for attribute %s must be str. Got: %r' % (converter.attr, type(val)))
         if converter.autostrip: val = val.strip()
         max_len = converter.max_len
         val_len = len(val)
@@ -533,16 +533,16 @@ class IntConverter(Converter):
         if isinstance(val, int_types): pass
         elif hasattr(val, '__index__'):
             val = val.__index__()
-        elif isinstance(val, basestring):
+        elif isinstance(val, str):
             try: val = int(val)
             except ValueError: throw(ValueError,
                 'Value type for attribute %s must be int. Got string %r' % (converter.attr, val))
         else: throw(TypeError, 'Value type for attribute %s must be int. Got: %r' % (converter.attr, type(val)))
 
-        if converter.min_val and val < converter.min_val:
+        if converter.min_val is not None and val < converter.min_val:
             throw(ValueError, 'Value %r of attr %s is less than the minimum allowed value %r'
                              % (val, converter.attr, converter.min_val))
-        if converter.max_val and val > converter.max_val:
+        if converter.max_val is not None and val > converter.max_val:
             throw(ValueError, 'Value %r of attr %s is greater than the maximum allowed value %r'
                              % (val, converter.attr, converter.max_val))
         return val
@@ -672,10 +672,6 @@ class BlobConverter(Converter):
         if not isinstance(val, buffer):
             try: val = buffer(val)
             except: pass
-        elif PY2 and converter.attr is not None and converter.attr.is_part_of_unique_index:
-            try: hash(val)
-            except TypeError:
-                val = buffer(val)
         return val
     def sql_type(converter):
         return 'BLOB'
@@ -684,7 +680,7 @@ class DateConverter(Converter):
     def validate(converter, val, obj=None):
         if isinstance(val, datetime): return val.date()
         if isinstance(val, date): return val
-        if isinstance(val, basestring): return str2date(val)
+        if isinstance(val, str): return str2date(val)
         throw(TypeError, "Attribute %r: expected type is 'date'. Got: %r" % (converter.attr, val))
     def sql2py(converter, val):
         if not isinstance(val, date): throw(ValueError,
@@ -733,7 +729,7 @@ class TimeConverter(ConverterWithMicroseconds):
     sql_type_name = 'TIME'
     def validate(converter, val, obj=None):
         if isinstance(val, time): pass
-        elif isinstance(val, basestring): val = str2time(val)
+        elif isinstance(val, str): val = str2time(val)
         else: throw(TypeError, "Attribute %r: expected type is 'time'. Got: %r" % (converter.attr, val))
         mcs = converter.round_microseconds_to_precision(val.microsecond, converter.precision)
         if mcs is not None: val = val.replace(microsecond=mcs)
@@ -747,7 +743,7 @@ class TimedeltaConverter(ConverterWithMicroseconds):
     sql_type_name = 'INTERVAL'
     def validate(converter, val, obj=None):
         if isinstance(val, timedelta): pass
-        elif isinstance(val, basestring): val = str2timedelta(val)
+        elif isinstance(val, str): val = str2timedelta(val)
         else: throw(TypeError, "Attribute %r: expected type is 'timedelta'. Got: %r" % (converter.attr, val))
         mcs = converter.round_microseconds_to_precision(val.microseconds, converter.precision)
         if mcs is not None: val = timedelta(val.days, val.seconds, mcs)
@@ -761,7 +757,7 @@ class DatetimeConverter(ConverterWithMicroseconds):
     sql_type_name = 'DATETIME'
     def validate(converter, val, obj=None):
         if isinstance(val, datetime): pass
-        elif isinstance(val, basestring): val = str2datetime(val)
+        elif isinstance(val, str): val = str2datetime(val)
         else: throw(TypeError, "Attribute %r: expected type is 'datetime'. Got: %r" % (converter.attr, val))
         mcs = converter.round_microseconds_to_precision(val.microsecond, converter.precision)
         if mcs is not None: val = val.replace(microsecond=mcs)
@@ -780,7 +776,7 @@ class UuidConverter(Converter):
     def validate(converter, val, obj=None):
         if isinstance(val, UUID): return val
         if isinstance(val, buffer): return UUID(bytes=val)
-        if isinstance(val, basestring):
+        if isinstance(val, str):
             if len(val) == 16: return UUID(bytes=val)
             return UUID(hex=val)
         if isinstance(val, int): return UUID(int=val)
@@ -818,8 +814,8 @@ class JsonConverter(Converter):
         return TrackedValue.make(obj, converter.attr, val)
     def dbvals_equal(converter, x, y):
         if x == y: return True  # optimization
-        if isinstance(x, basestring): x = json.loads(x)
-        if isinstance(y, basestring): y = json.loads(y)
+        if isinstance(x, str): x = json.loads(x)
+        if isinstance(y, str): y = json.loads(y)
         return x == y
     def sql_type(converter):
         return "JSON"
@@ -827,7 +823,7 @@ class JsonConverter(Converter):
 class ArrayConverter(Converter):
     array_types = {
         int: ('int', IntConverter),
-        unicode: ('text', StrConverter),
+        str: ('text', StrConverter),
         float: ('real', RealConverter)
     }
 
@@ -839,7 +835,7 @@ class ArrayConverter(Converter):
         if isinstance(val, TrackedValue) and val.obj_ref() is obj and val.attr is converter.attr:
             return val
 
-        if isinstance(val, basestring) or not hasattr(val, '__len__'):
+        if isinstance(val, str) or not hasattr(val, '__len__'):
             items = [val]
         else:
             items = list(val)
@@ -847,8 +843,6 @@ class ArrayConverter(Converter):
         if item_type == float:
             item_type = (float, int)
         for i, v in enumerate(items):
-            if PY2 and isinstance(v, str):
-                v = v.decode('ascii')
             if not isinstance(v, item_type):
                 if hasattr(v, '__index__'):
                     items[i] = v.__index__()
